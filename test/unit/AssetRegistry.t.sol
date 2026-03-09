@@ -11,10 +11,7 @@ contract AssetRegistryTest is Test {
     address internal nonOwner = address(0xBEEF);
 
     bytes32 internal constant BTC = keccak256("BTC");
-    bytes32 internal constant USDC = keccak256("USDC");
     bytes32 internal constant BTC_INTEREST = keccak256("BTC_INTEREST");
-    bytes32 internal constant BTC_RISK = keccak256("BTC_RISK");
-    bytes32 internal constant BTC_REMOTE_POLICY = keccak256("BTC_REMOTE_POLICY");
 
     address internal constant BTC_TOKEN = address(0x1001);
     address internal constant BTC_ORACLE = address(0x2001);
@@ -29,14 +26,10 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
 
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
+        AssetRegistry.AssetConfig memory cfg = registry.getAsset(BTC);
 
         assertEq(cfg.token, BTC_TOKEN);
         assertEq(cfg.oracle, BTC_ORACLE);
@@ -44,10 +37,6 @@ contract AssetRegistryTest is Test {
         assertEq(cfg.decimals, 8);
         assertEq(cfg.assetId, BTC);
         assertEq(cfg.interestModelId, BTC_INTEREST);
-        assertEq(cfg.riskModelId, BTC_RISK);
-        assertEq(cfg.remoteLiquidityEnabled, true);
-        assertEq(cfg.settlementAssetId, USDC);
-        assertEq(cfg.remotePolicyId, BTC_REMOTE_POLICY);
     }
 
     function test_registerAsset_setsTokenMapping() external {
@@ -56,11 +45,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
 
         bytes32 assetId = registry.getAssetIdByToken(BTC_TOKEN);
@@ -75,11 +60,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -90,11 +71,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -105,11 +82,7 @@ contract AssetRegistryTest is Test {
             address(0),
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -120,11 +93,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             address(0),
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -135,11 +104,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             19,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -149,11 +114,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
 
         vm.expectRevert(abi.encodeWithSelector(AssetRegistry.AssetAlreadyRegistered.selector, BTC));
@@ -162,11 +123,7 @@ contract AssetRegistryTest is Test {
             address(0x9999),
             address(0x8888),
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            false,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 
@@ -180,33 +137,14 @@ contract AssetRegistryTest is Test {
         assertEq(registry.isActive(BTC), true);
     }
 
-    function test_setRemoteLiquidityStatus_updatesValue() external {
-        _registerBTC();
-
-        registry.setRemoteLiquidityStatus(BTC, false);
-
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
-        assertEq(cfg.remoteLiquidityEnabled, false);
-    }
-
     function test_setOracle_updatesOracle() external {
         _registerBTC();
 
         address newOracle = address(0x3001);
         registry.setOracle(BTC, newOracle);
 
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
+        AssetRegistry.AssetConfig memory cfg = registry.getAsset(BTC);
         assertEq(cfg.oracle, newOracle);
-    }
-
-    function test_setRiskModelId_updatesValue() external {
-        _registerBTC();
-
-        bytes32 newRiskModel = keccak256("BTC_RISK_V2");
-        registry.setRiskModelId(BTC, newRiskModel);
-
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
-        assertEq(cfg.riskModelId, newRiskModel);
     }
 
     function test_setInterestModelId_updatesValue() external {
@@ -215,28 +153,8 @@ contract AssetRegistryTest is Test {
         bytes32 newInterestModel = keccak256("BTC_INTEREST_V2");
         registry.setInterestModelId(BTC, newInterestModel);
 
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
+        AssetRegistry.AssetConfig memory cfg = registry.getAsset(BTC);
         assertEq(cfg.interestModelId, newInterestModel);
-    }
-
-    function test_setSettlementAssetId_updatesValue() external {
-        _registerBTC();
-
-        bytes32 newSettlementAsset = keccak256("USDT");
-        registry.setSettlementAssetId(BTC, newSettlementAsset);
-
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
-        assertEq(cfg.settlementAssetId, newSettlementAsset);
-    }
-
-    function test_setRemotePolicyId_updatesValue() external {
-        _registerBTC();
-
-        bytes32 newPolicy = keccak256("BTC_REMOTE_POLICY_V2");
-        registry.setRemotePolicyId(BTC, newPolicy);
-
-        AssetRegistry.AssetConfig memory cfg = registry.getAssetConfig(BTC);
-        assertEq(cfg.remotePolicyId, newPolicy);
     }
 
     function test_isSupported_returnsFalseForUnknownAsset() external {
@@ -246,6 +164,11 @@ contract AssetRegistryTest is Test {
     function test_isSupported_returnsTrueForRegisteredAsset() external {
         _registerBTC();
         assertEq(registry.isSupported(BTC), true);
+    }
+
+    function test_getAsset_revertsForUnknownAsset() external {
+        vm.expectRevert(abi.encodeWithSelector(AssetRegistry.AssetNotFound.selector, BTC));
+        registry.getAsset(BTC);
     }
 
     function test_getAssetConfig_revertsForUnknownAsset() external {
@@ -264,11 +187,7 @@ contract AssetRegistryTest is Test {
             BTC_TOKEN,
             BTC_ORACLE,
             8,
-            BTC_INTEREST,
-            BTC_RISK,
-            true,
-            USDC,
-            BTC_REMOTE_POLICY
+            BTC_INTEREST
         );
     }
 }

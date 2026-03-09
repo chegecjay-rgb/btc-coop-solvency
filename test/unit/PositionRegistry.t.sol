@@ -120,7 +120,10 @@ contract PositionRegistryTest is Test {
 
         PositionRegistry.Position memory p = registry.getPosition(positionId);
         assertEq(p.activeRemoteIntentId, INTENT_ID);
-        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.RemoteFundingPending));
+        assertEq(
+            uint256(p.state),
+            uint256(PositionRegistry.PositionState.RemoteLiquidityPending)
+        );
     }
 
     function test_bindRemoteIntent_revertsOnZeroIntentId() external {

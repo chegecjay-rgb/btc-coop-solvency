@@ -14,12 +14,13 @@ contract LendingLiquidityVaultTest is Test {
     address internal nonAuthorized = address(0xBEEF);
     address internal alice = address(0x1111);
     address internal bob = address(0x2222);
+    address internal receiver = address(0x3333);
 
-    bytes32 internal constant MARKET_ID = keccak256("BTC_USDC");
+    bytes32 internal constant ASSET_ID = keccak256("BTC");
 
     function setUp() external {
         token = new MockERC20("USD Coin", "USDC", 6);
-        vault = new LendingLiquidityVault(owner, address(token), MARKET_ID);
+        vault = new LendingLiquidityVault(owner, address(token), ASSET_ID);
         vault.setAuthorizedWriter(writer, true);
 
         token.mint(alice, 1_000_000e6);
@@ -28,14 +29,14 @@ contract LendingLiquidityVaultTest is Test {
 
     function test_constructor_setsMetadata() external view {
         assertEq(vault.quoteAsset(), address(token));
-        assertEq(vault.marketId(), MARKET_ID);
+        assertEq(vault.assetId(), ASSET_ID);
     }
 
     function test_depositLiquidity_firstDepositMintsOneToOneShares() external {
         vm.startPrank(alice);
         token.approve(address(vault), 100e6);
 
-        uint256 shares = vault.depositLiquidity(100e6);
+        uint256 shares = vault.depositLiquidity(100e6, alice);
         vm.stopPrank();
 
         assertEq(shares, 100e6);
@@ -45,15 +46,27 @@ contract LendingLiquidityVaultTest is Test {
         assertEq(vault.availableLiquidity(), 100e6);
     }
 
+    function test_depositLiquidity_canDepositForReceiver() external {
+        vm.startPrank(alice);
+        token.approve(address(vault), 100e6);
+
+        uint256 shares = vault.depositLiquidity(100e6, receiver);
+        vm.stopPrank();
+
+        assertEq(shares, 100e6);
+        assertEq(vault.lenderShares(receiver), 100e6);
+        assertEq(vault.lenderShares(alice), 0);
+    }
+
     function test_depositLiquidity_secondDepositMintsProRataShares() external {
         vm.startPrank(alice);
         token.approve(address(vault), 100e6);
-        vault.depositLiquidity(100e6);
+        vault.depositLiquidity(100e6, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         token.approve(address(vault), 50e6);
-        uint256 shares = vault.depositLiquidity(50e6);
+        uint256 shares = vault.depositLiquidity(50e6, bob);
         vm.stopPrank();
 
         assertEq(shares, 50e6);
@@ -67,16 +80,24 @@ contract LendingLiquidityVaultTest is Test {
         vm.startPrank(alice);
         token.approve(address(vault), 1e6);
         vm.expectRevert(LendingLiquidityVault.InvalidAmount.selector);
-        vault.depositLiquidity(0);
+        vault.depositLiquidity(0, alice);
+        vm.stopPrank();
+    }
+
+    function test_depositLiquidity_revertsOnZeroReceiver() external {
+        vm.startPrank(alice);
+        token.approve(address(vault), 1e6);
+        vm.expectRevert(LendingLiquidityVault.ZeroAddress.selector);
+        vault.depositLiquidity(1e6, address(0));
         vm.stopPrank();
     }
 
     function test_withdrawLiquidity_returnsAssets() external {
         vm.startPrank(alice);
         token.approve(address(vault), 100e6);
-        vault.depositLiquidity(100e6);
+        vault.depositLiquidity(100e6, alice);
 
-        uint256 assets = vault.withdrawLiquidity(40e6);
+        uint256 assets = vault.withdrawLiquidity(40e6, alice);
         vm.stopPrank();
 
         assertEq(assets, 40e6);
@@ -87,16 +108,34 @@ contract LendingLiquidityVaultTest is Test {
         assertEq(token.balanceOf(alice), 1_000_000e6 - 100e6 + 40e6);
     }
 
+    function test_withdrawLiquidity_canWithdrawToReceiver() external {
+        vm.startPrank(alice);
+        token.approve(address(vault), 100e6);
+        vault.depositLiquidity(100e6, alice);
+
+        uint256 assets = vault.withdrawLiquidity(25e6, receiver);
+        vm.stopPrank();
+
+        assertEq(assets, 25e6);
+        assertEq(token.balanceOf(receiver), 25e6);
+    }
+
     function test_withdrawLiquidity_revertsOnZeroAmount() external {
         vm.prank(alice);
         vm.expectRevert(LendingLiquidityVault.InvalidAmount.selector);
-        vault.withdrawLiquidity(0);
+        vault.withdrawLiquidity(0, alice);
+    }
+
+    function test_withdrawLiquidity_revertsOnZeroReceiver() external {
+        vm.prank(alice);
+        vm.expectRevert(LendingLiquidityVault.ZeroAddress.selector);
+        vault.withdrawLiquidity(1, address(0));
     }
 
     function test_withdrawLiquidity_revertsIfInsufficientShares() external {
         vm.startPrank(alice);
         token.approve(address(vault), 100e6);
-        vault.depositLiquidity(100e6);
+        vault.depositLiquidity(100e6, alice);
 
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -105,17 +144,17 @@ contract LendingLiquidityVaultTest is Test {
                 100e6
             )
         );
-        vault.withdrawLiquidity(101e6);
+        vault.withdrawLiquidity(101e6, alice);
         vm.stopPrank();
     }
 
     function test_withdrawLiquidity_revertsIfInsufficientAvailableLiquidity() external {
         vm.startPrank(alice);
         token.approve(address(vault), 100e6);
-        vault.depositLiquidity(100e6);
+        vault.depositLiquidity(100e6, alice);
         vm.stopPrank();
 
-        vault.allocateToBorrower(80e6);
+        vault.allocateToBorrower(receiver, 80e6);
 
         vm.startPrank(alice);
         vm.expectRevert(
@@ -125,14 +164,14 @@ contract LendingLiquidityVaultTest is Test {
                 20e6
             )
         );
-        vault.withdrawLiquidity(100e6);
+        vault.withdrawLiquidity(100e6, alice);
         vm.stopPrank();
     }
 
     function test_allocateToBorrower_reducesAvailableLiquidity() external {
         _seedVault(100e6);
 
-        vault.allocateToBorrower(30e6);
+        vault.allocateToBorrower(receiver, 30e6);
 
         assertEq(vault.totalLiquidity(), 100e6);
         assertEq(vault.availableLiquidity(), 70e6);
@@ -143,7 +182,7 @@ contract LendingLiquidityVaultTest is Test {
 
         vm.prank(nonAuthorized);
         vm.expectRevert(LendingLiquidityVault.NotAuthorized.selector);
-        vault.allocateToBorrower(30e6);
+        vault.allocateToBorrower(receiver, 30e6);
     }
 
     function test_allocateToBorrower_revertsIfInsufficientAvailable() external {
@@ -156,14 +195,18 @@ contract LendingLiquidityVaultTest is Test {
                 100e6
             )
         );
-        vault.allocateToBorrower(120e6);
+        vault.allocateToBorrower(receiver, 120e6);
     }
 
     function test_receiveRepayment_increasesLiquidity() external {
         _seedVault(100e6);
-        vault.allocateToBorrower(40e6);
+        vault.allocateToBorrower(receiver, 40e6);
 
-        vault.receiveRepayment(25e6);
+        vm.prank(alice);
+        token.approve(address(vault), 25e6);
+
+        vm.prank(writer);
+        vault.receiveRepaymentFrom(alice, 25e6);
 
         assertEq(vault.totalLiquidity(), 125e6);
         assertEq(vault.availableLiquidity(), 85e6);
@@ -172,43 +215,7 @@ contract LendingLiquidityVaultTest is Test {
     function test_receiveRepayment_revertsIfNotAuthorized() external {
         vm.prank(nonAuthorized);
         vm.expectRevert(LendingLiquidityVault.NotAuthorized.selector);
-        vault.receiveRepayment(1e6);
-    }
-
-    function test_registerPendingRemoteInbound_updatesCounter() external {
-        vault.registerPendingRemoteInbound(50e6);
-        assertEq(vault.pendingRemoteInbound(), 50e6);
-    }
-
-    function test_registerPendingRemoteInbound_revertsIfNotAuthorized() external {
-        vm.prank(nonAuthorized);
-        vm.expectRevert(LendingLiquidityVault.NotAuthorized.selector);
-        vault.registerPendingRemoteInbound(50e6);
-    }
-
-    function test_receiveRemoteLiquidity_updatesAccounting() external {
-        vault.registerPendingRemoteInbound(50e6);
-
-        vault.receiveRemoteLiquidity(20e6);
-
-        assertEq(vault.pendingRemoteInbound(), 30e6);
-        assertEq(vault.settledRemoteInbound(), 20e6);
-        assertEq(vault.totalLiquidity(), 20e6);
-        assertEq(vault.availableLiquidity(), 20e6);
-        assertEq(vault.remoteLiquidityUtilized(), 20e6);
-    }
-
-    function test_receiveRemoteLiquidity_revertsIfTooLarge() external {
-        vault.registerPendingRemoteInbound(10e6);
-
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                LendingLiquidityVault.InsufficientAvailableLiquidity.selector,
-                20e6,
-                10e6
-            )
-        );
-        vault.receiveRemoteLiquidity(20e6);
+        vault.receiveRepaymentFrom(alice, 1e6);
     }
 
     function test_utilization_returnsZeroWhenEmpty() external view {
@@ -217,7 +224,7 @@ contract LendingLiquidityVaultTest is Test {
 
     function test_utilization_returnsExpectedBps() external {
         _seedVault(100e6);
-        vault.allocateToBorrower(25e6);
+        vault.allocateToBorrower(receiver, 25e6);
 
         assertEq(vault.utilization(), 2500);
     }
@@ -240,7 +247,7 @@ contract LendingLiquidityVaultTest is Test {
     function _seedVault(uint256 amount) internal {
         vm.startPrank(alice);
         token.approve(address(vault), amount);
-        vault.depositLiquidity(amount);
+        vault.depositLiquidity(amount, alice);
         vm.stopPrank();
     }
 }

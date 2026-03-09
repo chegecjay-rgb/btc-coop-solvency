@@ -17,10 +17,6 @@ contract AssetRegistry is Ownable {
         uint8 decimals;
         bytes32 assetId;
         bytes32 interestModelId;
-        bytes32 riskModelId;
-        bool remoteLiquidityEnabled;
-        bytes32 settlementAssetId;
-        bytes32 remotePolicyId;
     }
 
     mapping(bytes32 => AssetConfig) private _assets;
@@ -31,20 +27,12 @@ contract AssetRegistry is Ownable {
         address indexed token,
         address indexed oracle,
         uint8 decimals,
-        bytes32 interestModelId,
-        bytes32 riskModelId,
-        bool remoteLiquidityEnabled,
-        bytes32 settlementAssetId,
-        bytes32 remotePolicyId
+        bytes32 interestModelId
     );
 
     event AssetStatusUpdated(bytes32 indexed assetId, bool isActive);
-    event RemoteLiquidityStatusUpdated(bytes32 indexed assetId, bool enabled);
     event AssetOracleUpdated(bytes32 indexed assetId, address indexed oracle);
-    event AssetRiskModelUpdated(bytes32 indexed assetId, bytes32 indexed riskModelId);
     event AssetInterestModelUpdated(bytes32 indexed assetId, bytes32 indexed interestModelId);
-    event SettlementAssetUpdated(bytes32 indexed assetId, bytes32 indexed settlementAssetId);
-    event RemotePolicyUpdated(bytes32 indexed assetId, bytes32 indexed remotePolicyId);
 
     constructor(address initialOwner) Ownable(initialOwner) {
         if (initialOwner == address(0)) revert ZeroAddress();
@@ -55,11 +43,7 @@ contract AssetRegistry is Ownable {
         address token,
         address oracle,
         uint8 decimals,
-        bytes32 interestModelId,
-        bytes32 riskModelId,
-        bool remoteLiquidityEnabled,
-        bytes32 settlementAssetId,
-        bytes32 remotePolicyId
+        bytes32 interestModelId
     ) external onlyOwner {
         if (assetId == bytes32(0)) revert InvalidAssetId();
         if (token == address(0) || oracle == address(0)) revert ZeroAddress();
@@ -72,38 +56,18 @@ contract AssetRegistry is Ownable {
             isActive: true,
             decimals: decimals,
             assetId: assetId,
-            interestModelId: interestModelId,
-            riskModelId: riskModelId,
-            remoteLiquidityEnabled: remoteLiquidityEnabled,
-            settlementAssetId: settlementAssetId,
-            remotePolicyId: remotePolicyId
+            interestModelId: interestModelId
         });
 
         _assetIdByToken[token] = assetId;
 
-        emit AssetRegistered(
-            assetId,
-            token,
-            oracle,
-            decimals,
-            interestModelId,
-            riskModelId,
-            remoteLiquidityEnabled,
-            settlementAssetId,
-            remotePolicyId
-        );
+        emit AssetRegistered(assetId, token, oracle, decimals, interestModelId);
     }
 
     function setAssetStatus(bytes32 assetId, bool active) external onlyOwner {
         AssetConfig storage config = _requireAsset(assetId);
         config.isActive = active;
         emit AssetStatusUpdated(assetId, active);
-    }
-
-    function setRemoteLiquidityStatus(bytes32 assetId, bool enabled) external onlyOwner {
-        AssetConfig storage config = _requireAsset(assetId);
-        config.remoteLiquidityEnabled = enabled;
-        emit RemoteLiquidityStatusUpdated(assetId, enabled);
     }
 
     function setOracle(bytes32 assetId, address oracle) external onlyOwner {
@@ -113,28 +77,14 @@ contract AssetRegistry is Ownable {
         emit AssetOracleUpdated(assetId, oracle);
     }
 
-    function setRiskModelId(bytes32 assetId, bytes32 riskModelId) external onlyOwner {
-        AssetConfig storage config = _requireAsset(assetId);
-        config.riskModelId = riskModelId;
-        emit AssetRiskModelUpdated(assetId, riskModelId);
-    }
-
     function setInterestModelId(bytes32 assetId, bytes32 interestModelId) external onlyOwner {
         AssetConfig storage config = _requireAsset(assetId);
         config.interestModelId = interestModelId;
         emit AssetInterestModelUpdated(assetId, interestModelId);
     }
 
-    function setSettlementAssetId(bytes32 assetId, bytes32 settlementAssetId) external onlyOwner {
-        AssetConfig storage config = _requireAsset(assetId);
-        config.settlementAssetId = settlementAssetId;
-        emit SettlementAssetUpdated(assetId, settlementAssetId);
-    }
-
-    function setRemotePolicyId(bytes32 assetId, bytes32 remotePolicyId) external onlyOwner {
-        AssetConfig storage config = _requireAsset(assetId);
-        config.remotePolicyId = remotePolicyId;
-        emit RemotePolicyUpdated(assetId, remotePolicyId);
+    function getAsset(bytes32 assetId) external view returns (AssetConfig memory) {
+        return _requireAsset(assetId);
     }
 
     function getAssetConfig(bytes32 assetId) external view returns (AssetConfig memory) {

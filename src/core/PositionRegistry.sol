@@ -16,7 +16,7 @@ contract PositionRegistry is Ownable {
         Healthy,
         AtRisk,
         RescueEligible,
-        RemoteFundingPending,
+        RemoteLiquidityPending,
         Rescued,
         Restricted,
         Terminal,
@@ -145,10 +145,10 @@ contract PositionRegistry is Ownable {
         if (position.activeRemoteIntentId != bytes32(0)) revert RemoteIntentAlreadySet();
 
         position.activeRemoteIntentId = intentId;
-        position.state = PositionState.RemoteFundingPending;
+        position.state = PositionState.RemoteLiquidityPending;
 
         emit RemoteIntentBound(positionId, intentId);
-        emit PositionStateUpdated(positionId, PositionState.RemoteFundingPending);
+        emit PositionStateUpdated(positionId, PositionState.RemoteLiquidityPending);
     }
 
     function clearRemoteIntent(uint256 positionId) external onlyAuthorized {

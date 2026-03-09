@@ -6,21 +6,18 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract LendingLiquidityVault is Ownable {
     error ZeroAddress();
+    error InvalidAssetId();
     error NotAuthorized();
     error InvalidAmount();
     error InsufficientShares(uint256 requested, uint256 available);
     error InsufficientAvailableLiquidity(uint256 requested, uint256 available);
 
     address public immutable quoteAsset;
-    bytes32 public immutable marketId;
+    bytes32 public immutable assetId;
 
     uint256 public totalLiquidity;
     uint256 public availableLiquidity;
     uint256 public totalShares;
-
-    uint256 public pendingRemoteInbound;
-    uint256 public settledRemoteInbound;
-    uint256 public remoteLiquidityUtilized;
 
     mapping(address => uint256) public lenderShares;
     mapping(address => bool) public authorizedWriter;
@@ -29,6 +26,7 @@ contract LendingLiquidityVault is Ownable {
 
     event LiquidityDeposited(
         address indexed lender,
+        address indexed receiver,
         uint256 assetAmount,
         uint256 shareAmount,
         uint256 newTotalLiquidity,
@@ -38,6 +36,7 @@ contract LendingLiquidityVault is Ownable {
 
     event LiquidityWithdrawn(
         address indexed lender,
+        address indexed receiver,
         uint256 assetAmount,
         uint256 shareAmount,
         uint256 newTotalLiquidity,
@@ -46,25 +45,14 @@ contract LendingLiquidityVault is Ownable {
     );
 
     event BorrowerLiquidityAllocated(
+        address indexed receiver,
         uint256 amount,
         uint256 newAvailableLiquidity
     );
 
     event RepaymentReceived(
+        address indexed from,
         uint256 amount,
-        uint256 newTotalLiquidity,
-        uint256 newAvailableLiquidity
-    );
-
-    event PendingRemoteInboundRegistered(
-        uint256 amount,
-        uint256 newPendingRemoteInbound
-    );
-
-    event RemoteLiquidityReceived(
-        uint256 amount,
-        uint256 newPendingRemoteInbound,
-        uint256 newSettledRemoteInbound,
         uint256 newTotalLiquidity,
         uint256 newAvailableLiquidity
     );
@@ -72,13 +60,13 @@ contract LendingLiquidityVault is Ownable {
     constructor(
         address initialOwner,
         address quoteAsset_,
-        bytes32 marketId_
+        bytes32 assetId_
     ) Ownable(initialOwner) {
         if (initialOwner == address(0) || quoteAsset_ == address(0)) revert ZeroAddress();
-        if (marketId_ == bytes32(0)) revert ZeroAddress();
+        if (assetId_ == bytes32(0)) revert InvalidAssetId();
 
         quoteAsset = quoteAsset_;
-        marketId = marketId_;
+        assetId = assetId_;
     }
 
     modifier onlyAuthorized() {
@@ -92,21 +80,23 @@ contract LendingLiquidityVault is Ownable {
         emit AuthorizedWriterSet(writer, allowed);
     }
 
-    function depositLiquidity(uint256 amount) external returns (uint256 sharesMinted) {
+    function depositLiquidity(uint256 amount, address receiver) external returns (uint256 sharesMinted) {
         if (amount == 0) revert InvalidAmount();
+        if (receiver == address(0)) revert ZeroAddress();
 
         sharesMinted = _previewDepositShares(amount);
 
         bool ok = IERC20(quoteAsset).transferFrom(msg.sender, address(this), amount);
         require(ok, "TRANSFER_FROM_FAILED");
 
-        lenderShares[msg.sender] += sharesMinted;
+        lenderShares[receiver] += sharesMinted;
         totalShares += sharesMinted;
         totalLiquidity += amount;
         availableLiquidity += amount;
 
         emit LiquidityDeposited(
             msg.sender,
+            receiver,
             amount,
             sharesMinted,
             totalLiquidity,
@@ -115,8 +105,9 @@ contract LendingLiquidityVault is Ownable {
         );
     }
 
-    function withdrawLiquidity(uint256 shareAmount) external returns (uint256 assetAmount) {
+    function withdrawLiquidity(uint256 shareAmount, address receiver) external returns (uint256 assetAmount) {
         if (shareAmount == 0) revert InvalidAmount();
+        if (receiver == address(0)) revert ZeroAddress();
 
         uint256 userShares = lenderShares[msg.sender];
         if (shareAmount > userShares) {
@@ -134,11 +125,12 @@ contract LendingLiquidityVault is Ownable {
         totalLiquidity -= assetAmount;
         availableLiquidity -= assetAmount;
 
-        bool ok = IERC20(quoteAsset).transfer(msg.sender, assetAmount);
+        bool ok = IERC20(quoteAsset).transfer(receiver, assetAmount);
         require(ok, "TRANSFER_FAILED");
 
         emit LiquidityWithdrawn(
             msg.sender,
+            receiver,
             assetAmount,
             shareAmount,
             totalLiquidity,
@@ -147,53 +139,32 @@ contract LendingLiquidityVault is Ownable {
         );
     }
 
-    function allocateToBorrower(uint256 amount) external onlyAuthorized {
+    function allocateToBorrower(address receiver, uint256 amount) external onlyAuthorized {
         if (amount == 0) revert InvalidAmount();
+        if (receiver == address(0)) revert ZeroAddress();
         if (amount > availableLiquidity) {
             revert InsufficientAvailableLiquidity(amount, availableLiquidity);
         }
 
         availableLiquidity -= amount;
 
-        emit BorrowerLiquidityAllocated(amount, availableLiquidity);
+        bool ok = IERC20(quoteAsset).transfer(receiver, amount);
+        require(ok, "TRANSFER_FAILED");
+
+        emit BorrowerLiquidityAllocated(receiver, amount, availableLiquidity);
     }
 
-    function receiveRepayment(uint256 amount) external onlyAuthorized {
+    function receiveRepaymentFrom(address from, uint256 amount) external onlyAuthorized {
         if (amount == 0) revert InvalidAmount();
+        if (from == address(0)) revert ZeroAddress();
+
+        bool ok = IERC20(quoteAsset).transferFrom(from, address(this), amount);
+        require(ok, "TRANSFER_FROM_FAILED");
 
         totalLiquidity += amount;
         availableLiquidity += amount;
 
-        emit RepaymentReceived(amount, totalLiquidity, availableLiquidity);
-    }
-
-    function registerPendingRemoteInbound(uint256 amount) external onlyAuthorized {
-        if (amount == 0) revert InvalidAmount();
-
-        pendingRemoteInbound += amount;
-
-        emit PendingRemoteInboundRegistered(amount, pendingRemoteInbound);
-    }
-
-    function receiveRemoteLiquidity(uint256 amount) external onlyAuthorized {
-        if (amount == 0) revert InvalidAmount();
-        if (amount > pendingRemoteInbound) {
-            revert InsufficientAvailableLiquidity(amount, pendingRemoteInbound);
-        }
-
-        pendingRemoteInbound -= amount;
-        settledRemoteInbound += amount;
-        totalLiquidity += amount;
-        availableLiquidity += amount;
-        remoteLiquidityUtilized += amount;
-
-        emit RemoteLiquidityReceived(
-            amount,
-            pendingRemoteInbound,
-            settledRemoteInbound,
-            totalLiquidity,
-            availableLiquidity
-        );
+        emit RepaymentReceived(from, amount, totalLiquidity, availableLiquidity);
     }
 
     function utilization() external view returns (uint256) {

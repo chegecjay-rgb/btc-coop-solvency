@@ -1,7 +1,12 @@
 cache/
 out/
 broadcast/
-.env
-.DS_Store
-node_modules/
+artifacts/
 coverage/
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+*.log
+.DS_Store

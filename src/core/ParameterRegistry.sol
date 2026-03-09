@@ -6,118 +6,196 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract ParameterRegistry is Ownable {
     error ZeroAddress();
     error InvalidAssetId();
-    error AssetParamsNotFound(bytes32 assetId);
+    error ParamsNotFound(bytes32 assetId);
     error InvalidBpsValue(uint256 value);
     error InvalidRiskWindow();
 
     struct RiskParams {
-        uint256 maxBorrowLTV;
-        uint256 rescueTriggerLTV;
-        uint256 liquidationLTV;
-        uint256 targetPostRescueLTV;
+        uint256 maxBorrowLTVBps;
+        uint256 rescueTriggerLTVBps;
+        uint256 liquidationLTVBps;
+        uint256 targetPostRescueLTVBps;
         uint256 collateralHaircutBps;
         uint256 liquidationBufferBps;
         uint256 maxRescueAttempts;
         uint256 rescueCooldown;
         uint256 buybackClaimDuration;
+    }
+
+    struct InsuranceParams {
+        uint256 baseSystemInsuranceRateBps;
+        uint256 baseOptionalCoverRateBps;
+        uint256 maxCoverageBps;
+    }
+
+    struct RemoteLiquidityParams {
+        uint256 minLocalLiquidityBps;
+        uint256 highUtilizationBps;
+        uint256 maxPendingRescueLoadBps;
         uint256 remoteIntentFeeCapBps;
-        uint256 remoteIntentMaxSize;
-        uint256 remoteIntentExpiry;
-        uint256 remoteFillMinBps;
-        uint256 remoteLiquidityStressTriggerBps;
-        uint256 maxRemoteDependencyBps;
-        uint256 maxSolverConcentrationBps;
+        uint256 remoteIntentDeadline;
     }
 
     mapping(bytes32 => RiskParams) private _riskParamsByAsset;
-    mapping(bytes32 => uint256) private _globalParams;
+    mapping(bytes32 => InsuranceParams) private _insuranceParamsByAsset;
+    mapping(bytes32 => RemoteLiquidityParams) private _remoteParamsByAsset;
 
     event RiskParamsSet(
         bytes32 indexed assetId,
-        uint256 maxBorrowLTV,
-        uint256 rescueTriggerLTV,
-        uint256 liquidationLTV,
-        uint256 targetPostRescueLTV
+        uint256 maxBorrowLTVBps,
+        uint256 rescueTriggerLTVBps,
+        uint256 liquidationLTVBps,
+        uint256 targetPostRescueLTVBps
     );
 
-    event GlobalParamSet(bytes32 indexed key, uint256 value);
+    event InsuranceParamsSet(
+        bytes32 indexed assetId,
+        uint256 baseSystemInsuranceRateBps,
+        uint256 baseOptionalCoverRateBps,
+        uint256 maxCoverageBps
+    );
+
+    event RemoteLiquidityParamsSet(
+        bytes32 indexed assetId,
+        uint256 minLocalLiquidityBps,
+        uint256 highUtilizationBps,
+        uint256 maxPendingRescueLoadBps,
+        uint256 remoteIntentFeeCapBps,
+        uint256 remoteIntentDeadline
+    );
 
     constructor(address initialOwner) Ownable(initialOwner) {
         if (initialOwner == address(0)) revert ZeroAddress();
     }
 
-    function setRiskParams(bytes32 assetId, RiskParams calldata params) external onlyOwner {
+    function setRiskParams(bytes32 assetId, RiskParams calldata params_) external onlyOwner {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
-        _validateBps(params.maxBorrowLTV);
-        _validateBps(params.rescueTriggerLTV);
-        _validateBps(params.liquidationLTV);
-        _validateBps(params.targetPostRescueLTV);
-        _validateBps(params.collateralHaircutBps);
-        _validateBps(params.liquidationBufferBps);
-        _validateBps(params.remoteIntentFeeCapBps);
-        _validateBps(params.remoteFillMinBps);
-        _validateBps(params.remoteLiquidityStressTriggerBps);
-        _validateBps(params.maxRemoteDependencyBps);
-        _validateBps(params.maxSolverConcentrationBps);
+        _validateBps(params_.maxBorrowLTVBps);
+        _validateBps(params_.rescueTriggerLTVBps);
+        _validateBps(params_.liquidationLTVBps);
+        _validateBps(params_.targetPostRescueLTVBps);
+        _validateBps(params_.collateralHaircutBps);
+        _validateBps(params_.liquidationBufferBps);
 
         if (
-            !(params.maxBorrowLTV <= params.rescueTriggerLTV &&
-              params.rescueTriggerLTV <= params.liquidationLTV)
+            !(params_.maxBorrowLTVBps <= params_.rescueTriggerLTVBps &&
+              params_.rescueTriggerLTVBps <= params_.liquidationLTVBps)
         ) revert InvalidRiskWindow();
 
-        _riskParamsByAsset[assetId] = params;
+        _riskParamsByAsset[assetId] = params_;
 
         emit RiskParamsSet(
             assetId,
-            params.maxBorrowLTV,
-            params.rescueTriggerLTV,
-            params.liquidationLTV,
-            params.targetPostRescueLTV
+            params_.maxBorrowLTVBps,
+            params_.rescueTriggerLTVBps,
+            params_.liquidationLTVBps,
+            params_.targetPostRescueLTVBps
         );
     }
 
-    function setGlobalParam(bytes32 key, uint256 value) external onlyOwner {
-        if (key == bytes32(0)) revert InvalidAssetId();
-        _globalParams[key] = value;
-        emit GlobalParamSet(key, value);
-    }
-
     function getRiskParams(bytes32 assetId) external view returns (RiskParams memory) {
-        RiskParams memory params = _riskParamsByAsset[assetId];
-        if (_isUnset(params)) revert AssetParamsNotFound(assetId);
-        return params;
-    }
-
-    function getGlobalParam(bytes32 key) external view returns (uint256) {
-        return _globalParams[key];
+        RiskParams memory params_ = _riskParamsByAsset[assetId];
+        if (_isUnsetRisk(params_)) revert ParamsNotFound(assetId);
+        return params_;
     }
 
     function hasRiskParams(bytes32 assetId) external view returns (bool) {
-        return !_isUnset(_riskParamsByAsset[assetId]);
+        return !_isUnsetRisk(_riskParamsByAsset[assetId]);
+    }
+
+    function setInsuranceParams(bytes32 assetId, InsuranceParams calldata params_) external onlyOwner {
+        if (assetId == bytes32(0)) revert InvalidAssetId();
+
+        _validateBps(params_.baseSystemInsuranceRateBps);
+        _validateBps(params_.baseOptionalCoverRateBps);
+        _validateBps(params_.maxCoverageBps);
+
+        _insuranceParamsByAsset[assetId] = params_;
+
+        emit InsuranceParamsSet(
+            assetId,
+            params_.baseSystemInsuranceRateBps,
+            params_.baseOptionalCoverRateBps,
+            params_.maxCoverageBps
+        );
+    }
+
+    function getInsuranceParams(bytes32 assetId) external view returns (InsuranceParams memory) {
+        InsuranceParams memory params_ = _insuranceParamsByAsset[assetId];
+        if (_isUnsetInsurance(params_)) revert ParamsNotFound(assetId);
+        return params_;
+    }
+
+    function hasInsuranceParams(bytes32 assetId) external view returns (bool) {
+        return !_isUnsetInsurance(_insuranceParamsByAsset[assetId]);
+    }
+
+    function setRemoteLiquidityParams(
+        bytes32 assetId,
+        RemoteLiquidityParams calldata params_
+    ) external onlyOwner {
+        if (assetId == bytes32(0)) revert InvalidAssetId();
+
+        _validateBps(params_.minLocalLiquidityBps);
+        _validateBps(params_.highUtilizationBps);
+        _validateBps(params_.maxPendingRescueLoadBps);
+        _validateBps(params_.remoteIntentFeeCapBps);
+
+        _remoteParamsByAsset[assetId] = params_;
+
+        emit RemoteLiquidityParamsSet(
+            assetId,
+            params_.minLocalLiquidityBps,
+            params_.highUtilizationBps,
+            params_.maxPendingRescueLoadBps,
+            params_.remoteIntentFeeCapBps,
+            params_.remoteIntentDeadline
+        );
+    }
+
+    function getRemoteLiquidityParams(
+        bytes32 assetId
+    ) external view returns (RemoteLiquidityParams memory) {
+        RemoteLiquidityParams memory params_ = _remoteParamsByAsset[assetId];
+        if (_isUnsetRemote(params_)) revert ParamsNotFound(assetId);
+        return params_;
+    }
+
+    function hasRemoteLiquidityParams(bytes32 assetId) external view returns (bool) {
+        return !_isUnsetRemote(_remoteParamsByAsset[assetId]);
     }
 
     function _validateBps(uint256 value) internal pure {
         if (value > 10_000) revert InvalidBpsValue(value);
     }
 
-    function _isUnset(RiskParams memory params) internal pure returns (bool) {
+    function _isUnsetRisk(RiskParams memory p) internal pure returns (bool) {
         return
-            params.maxBorrowLTV == 0 &&
-            params.rescueTriggerLTV == 0 &&
-            params.liquidationLTV == 0 &&
-            params.targetPostRescueLTV == 0 &&
-            params.collateralHaircutBps == 0 &&
-            params.liquidationBufferBps == 0 &&
-            params.maxRescueAttempts == 0 &&
-            params.rescueCooldown == 0 &&
-            params.buybackClaimDuration == 0 &&
-            params.remoteIntentFeeCapBps == 0 &&
-            params.remoteIntentMaxSize == 0 &&
-            params.remoteIntentExpiry == 0 &&
-            params.remoteFillMinBps == 0 &&
-            params.remoteLiquidityStressTriggerBps == 0 &&
-            params.maxRemoteDependencyBps == 0 &&
-            params.maxSolverConcentrationBps == 0;
+            p.maxBorrowLTVBps == 0 &&
+            p.rescueTriggerLTVBps == 0 &&
+            p.liquidationLTVBps == 0 &&
+            p.targetPostRescueLTVBps == 0 &&
+            p.collateralHaircutBps == 0 &&
+            p.liquidationBufferBps == 0 &&
+            p.maxRescueAttempts == 0 &&
+            p.rescueCooldown == 0 &&
+            p.buybackClaimDuration == 0;
+    }
+
+    function _isUnsetInsurance(InsuranceParams memory p) internal pure returns (bool) {
+        return
+            p.baseSystemInsuranceRateBps == 0 &&
+            p.baseOptionalCoverRateBps == 0 &&
+            p.maxCoverageBps == 0;
+    }
+
+    function _isUnsetRemote(RemoteLiquidityParams memory p) internal pure returns (bool) {
+        return
+            p.minLocalLiquidityBps == 0 &&
+            p.highUtilizationBps == 0 &&
+            p.maxPendingRescueLoadBps == 0 &&
+            p.remoteIntentFeeCapBps == 0 &&
+            p.remoteIntentDeadline == 0;
     }
 }

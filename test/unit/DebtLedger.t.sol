@@ -24,7 +24,8 @@ contract DebtLedgerTest is Test {
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
         assertEq(record.principal, 5 ether);
         assertGt(record.lastAccrualTime, 0);
-        assertEq(ledger.totalProtocolPrincipal(), 5 ether);
+        assertEq(ledger.totalPrincipal(), 5 ether);
+        assertEq(ledger.totalProtocolDebt(), 5 ether);
     }
 
     function test_initializeDebtRecord_revertsForZeroPositionId() external {
@@ -35,7 +36,9 @@ contract DebtLedgerTest is Test {
     function test_initializeDebtRecord_revertsIfAlreadyInitialized() external {
         ledger.initializeDebtRecord(POSITION_ID, 1 ether);
 
-        vm.expectRevert(DebtLedger.InvalidAmount.selector);
+        vm.expectRevert(
+            abi.encodeWithSelector(DebtLedger.AlreadyInitialized.selector, POSITION_ID)
+        );
         ledger.initializeDebtRecord(POSITION_ID, 1 ether);
     }
 
@@ -60,7 +63,8 @@ contract DebtLedgerTest is Test {
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
         assertEq(record.principal, 7 ether);
-        assertEq(ledger.totalProtocolPrincipal(), 7 ether);
+        assertEq(ledger.totalPrincipal(), 7 ether);
+        assertEq(ledger.totalProtocolDebt(), 7 ether);
     }
 
     function test_increaseDebt_revertsOnZeroAmount() external {
@@ -77,7 +81,8 @@ contract DebtLedgerTest is Test {
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
         assertEq(record.principal, 3 ether);
-        assertEq(ledger.totalProtocolPrincipal(), 3 ether);
+        assertEq(ledger.totalPrincipal(), 3 ether);
+        assertEq(ledger.totalProtocolDebt(), 3 ether);
     }
 
     function test_repayDebt_revertsIfTooMuch() external {
@@ -99,6 +104,7 @@ contract DebtLedgerTest is Test {
         assertEq(record.accruedInterest, 1 ether);
         assertEq(record.lastAccrualTime, 123456);
         assertEq(ledger.totalAccruedInterest(), 1 ether);
+        assertEq(ledger.totalProtocolDebt(), 6 ether);
     }
 
     function test_repayInterest_updatesInterest() external {
@@ -110,6 +116,7 @@ contract DebtLedgerTest is Test {
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
         assertEq(record.accruedInterest, 1 ether);
         assertEq(ledger.totalAccruedInterest(), 1 ether);
+        assertEq(ledger.totalProtocolDebt(), 6 ether);
     }
 
     function test_repayInterest_revertsIfTooMuch() external {
@@ -126,112 +133,121 @@ contract DebtLedgerTest is Test {
         ledger.repayInterest(POSITION_ID, 2 ether);
     }
 
-    function test_addRescueObligation_updatesFields() external {
+    function test_recordRescueUsage_updatesFields() external {
         _init();
 
-        ledger.addRescueObligation(POSITION_ID, 3 ether, 0.2 ether);
+        ledger.recordRescueUsage(POSITION_ID, 3 ether, 0.2 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.rescueObligation, 3 ether);
+        assertEq(record.rescueCapitalUsed, 3 ether);
         assertEq(record.rescueFeesAccrued, 0.2 ether);
-        assertEq(ledger.totalRescueObligation(), 3 ether);
-        assertEq(ledger.totalRescueFees(), 0.2 ether);
+        assertEq(ledger.totalRescueCapitalUsed(), 3 ether);
+        assertEq(ledger.totalRescueFeesAccrued(), 0.2 ether);
+        assertEq(ledger.totalProtocolDebt(), 8.2 ether);
     }
 
-    function test_repayRescueObligation_updatesValue() external {
+    function test_repayRescueCapital_updatesValue() external {
         _init();
-        ledger.addRescueObligation(POSITION_ID, 3 ether, 0.2 ether);
+        ledger.recordRescueUsage(POSITION_ID, 3 ether, 0.2 ether);
 
-        ledger.repayRescueObligation(POSITION_ID, 1 ether);
+        ledger.repayRescueCapital(POSITION_ID, 1 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.rescueObligation, 2 ether);
-        assertEq(ledger.totalRescueObligation(), 2 ether);
+        assertEq(record.rescueCapitalUsed, 2 ether);
+        assertEq(ledger.totalRescueCapitalUsed(), 2 ether);
+        assertEq(ledger.totalProtocolDebt(), 7.2 ether);
     }
 
     function test_repayRescueFee_updatesValue() external {
         _init();
-        ledger.addRescueObligation(POSITION_ID, 3 ether, 0.2 ether);
+        ledger.recordRescueUsage(POSITION_ID, 3 ether, 0.2 ether);
 
         ledger.repayRescueFee(POSITION_ID, 0.1 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
         assertEq(record.rescueFeesAccrued, 0.1 ether);
-        assertEq(ledger.totalRescueFees(), 0.1 ether);
+        assertEq(ledger.totalRescueFeesAccrued(), 0.1 ether);
+        assertEq(ledger.totalProtocolDebt(), 8.1 ether);
     }
 
-    function test_addPendingRemoteFunding_updatesFields() external {
+    function test_recordInsuranceUsage_updatesFields() external {
         _init();
 
-        ledger.addPendingRemoteFunding(POSITION_ID, 4 ether, 0.3 ether);
+        ledger.recordInsuranceUsage(POSITION_ID, 4 ether, 0.3 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.pendingRemoteFunding, 4 ether);
-        assertEq(record.remoteFundingFees, 0.3 ether);
-        assertEq(ledger.totalPendingRemoteFunding(), 4 ether);
-        assertEq(ledger.totalRemoteFundingFees(), 0.3 ether);
+        assertEq(record.insuranceCapitalUsed, 4 ether);
+        assertEq(record.insuranceChargesAccrued, 0.3 ether);
+        assertEq(ledger.totalInsuranceCapitalUsed(), 4 ether);
+        assertEq(ledger.totalInsuranceChargesAccrued(), 0.3 ether);
+        assertEq(ledger.totalProtocolDebt(), 9.3 ether);
     }
 
-    function test_clearPendingRemoteFunding_updatesValue() external {
+    function test_repayInsuranceCapital_updatesValue() external {
         _init();
-        ledger.addPendingRemoteFunding(POSITION_ID, 4 ether, 0.3 ether);
+        ledger.recordInsuranceUsage(POSITION_ID, 4 ether, 0.3 ether);
 
-        ledger.clearPendingRemoteFunding(POSITION_ID, 1 ether);
+        ledger.repayInsuranceCapital(POSITION_ID, 1 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.pendingRemoteFunding, 3 ether);
-        assertEq(ledger.totalPendingRemoteFunding(), 3 ether);
+        assertEq(record.insuranceCapitalUsed, 3 ether);
+        assertEq(ledger.totalInsuranceCapitalUsed(), 3 ether);
+        assertEq(ledger.totalProtocolDebt(), 8.3 ether);
     }
 
-    function test_repayRemoteFundingFee_updatesValue() external {
+    function test_repayInsuranceCharge_updatesValue() external {
         _init();
-        ledger.addPendingRemoteFunding(POSITION_ID, 4 ether, 0.3 ether);
+        ledger.recordInsuranceUsage(POSITION_ID, 4 ether, 0.3 ether);
 
-        ledger.repayRemoteFundingFee(POSITION_ID, 0.1 ether);
+        ledger.repayInsuranceCharge(POSITION_ID, 0.1 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.remoteFundingFees, 0.2 ether);
-        assertEq(ledger.totalRemoteFundingFees(), 0.2 ether);
+        assertEq(record.insuranceChargesAccrued, 0.2 ether);
+        assertEq(ledger.totalInsuranceChargesAccrued(), 0.2 ether);
+        assertEq(ledger.totalProtocolDebt(), 9.2 ether);
     }
 
-    function test_addRemoteRescueObligation_updatesValue() external {
+    function test_recordSettlementCost_updatesValue() external {
         _init();
 
-        ledger.addRemoteRescueObligation(POSITION_ID, 2 ether);
+        ledger.recordSettlementCost(POSITION_ID, 0.5 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.remoteRescueObligation, 2 ether);
-        assertEq(ledger.totalRemoteRescueObligation(), 2 ether);
+        assertEq(record.settlementCosts, 0.5 ether);
+        assertEq(ledger.totalSettlementCosts(), 0.5 ether);
+        assertEq(ledger.totalProtocolDebt(), 5.5 ether);
     }
 
-    function test_repayRemoteRescueObligation_updatesValue() external {
+    function test_repaySettlementCost_updatesValue() external {
         _init();
-        ledger.addRemoteRescueObligation(POSITION_ID, 2 ether);
+        ledger.recordSettlementCost(POSITION_ID, 0.5 ether);
 
-        ledger.repayRemoteRescueObligation(POSITION_ID, 1 ether);
+        ledger.repaySettlementCost(POSITION_ID, 0.2 ether);
 
         DebtLedger.DebtRecord memory record = ledger.getDebtRecord(POSITION_ID);
-        assertEq(record.remoteRescueObligation, 1 ether);
-        assertEq(ledger.totalRemoteRescueObligation(), 1 ether);
+        assertEq(record.settlementCosts, 0.3 ether);
+        assertEq(ledger.totalSettlementCosts(), 0.3 ether);
+        assertEq(ledger.totalProtocolDebt(), 5.3 ether);
     }
 
     function test_closeDebt_clearsAllValuesAndTotals() external {
         _init();
         ledger.accrueInterest(POSITION_ID, 1 ether);
-        ledger.addRescueObligation(POSITION_ID, 3 ether, 0.2 ether);
-        ledger.addPendingRemoteFunding(POSITION_ID, 4 ether, 0.3 ether);
-        ledger.addRemoteRescueObligation(POSITION_ID, 2 ether);
+        ledger.recordRescueUsage(POSITION_ID, 3 ether, 0.2 ether);
+        ledger.recordInsuranceUsage(POSITION_ID, 4 ether, 0.3 ether);
+        ledger.recordSettlementCost(POSITION_ID, 0.5 ether);
 
         ledger.closeDebt(POSITION_ID);
 
         assertEq(ledger.exists(POSITION_ID), false);
-        assertEq(ledger.totalProtocolPrincipal(), 0);
+        assertEq(ledger.totalProtocolDebt(), 0);
+        assertEq(ledger.totalPrincipal(), 0);
         assertEq(ledger.totalAccruedInterest(), 0);
-        assertEq(ledger.totalRescueObligation(), 0);
-        assertEq(ledger.totalRescueFees(), 0);
-        assertEq(ledger.totalPendingRemoteFunding(), 0);
-        assertEq(ledger.totalRemoteFundingFees(), 0);
-        assertEq(ledger.totalRemoteRescueObligation(), 0);
+        assertEq(ledger.totalRescueCapitalUsed(), 0);
+        assertEq(ledger.totalRescueFeesAccrued(), 0);
+        assertEq(ledger.totalInsuranceCapitalUsed(), 0);
+        assertEq(ledger.totalInsuranceChargesAccrued(), 0);
+        assertEq(ledger.totalSettlementCosts(), 0);
     }
 
     function test_onlyAuthorized_canIncreaseDebt() external {
@@ -258,28 +274,28 @@ contract DebtLedgerTest is Test {
         ledger.accrueInterest(POSITION_ID, 1 ether);
     }
 
-    function test_onlyAuthorized_canAddRescueObligation() external {
+    function test_onlyAuthorized_canRecordRescueUsage() external {
         _init();
 
         vm.prank(nonAuthorized);
         vm.expectRevert(DebtLedger.NotAuthorized.selector);
-        ledger.addRescueObligation(POSITION_ID, 1 ether, 0.1 ether);
+        ledger.recordRescueUsage(POSITION_ID, 1 ether, 0.1 ether);
     }
 
-    function test_onlyAuthorized_canAddPendingRemoteFunding() external {
+    function test_onlyAuthorized_canRecordInsuranceUsage() external {
         _init();
 
         vm.prank(nonAuthorized);
         vm.expectRevert(DebtLedger.NotAuthorized.selector);
-        ledger.addPendingRemoteFunding(POSITION_ID, 1 ether, 0.1 ether);
+        ledger.recordInsuranceUsage(POSITION_ID, 1 ether, 0.1 ether);
     }
 
-    function test_onlyAuthorized_canAddRemoteRescueObligation() external {
+    function test_onlyAuthorized_canRecordSettlementCost() external {
         _init();
 
         vm.prank(nonAuthorized);
         vm.expectRevert(DebtLedger.NotAuthorized.selector);
-        ledger.addRemoteRescueObligation(POSITION_ID, 1 ether);
+        ledger.recordSettlementCost(POSITION_ID, 0.1 ether);
     }
 
     function _init() internal {
