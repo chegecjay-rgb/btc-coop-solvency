@@ -19,6 +19,9 @@ interface IPriceOracle {
 }
 
 contract OracleGuard is Ownable {
+    uint8 private constant NORMALIZED_DECIMALS = 18;
+    uint256 private constant BPS_SCALE = 10_000;
+
     error ZeroAddress();
     error InvalidAssetId();
     error AssetOracleNotSet(bytes32 assetId);
@@ -30,6 +33,15 @@ contract OracleGuard is Ownable {
     struct OracleConfig {
         address primaryOracle;
         address secondaryOracle;
+    }
+
+    struct OracleObservation {
+        address oracle;
+        uint8 decimals;
+        uint80 roundId;
+        uint80 answeredInRound;
+        int256 answer;
+        uint256 updatedAt;
     }
 
     mapping(bytes32 => OracleConfig) private _oracleConfigByAsset;
@@ -99,35 +111,31 @@ contract OracleGuard is Ownable {
         }
     }
 
+    // Strict solvency path: every configured feed must validate, and dual-feed quotes
+    // must remain within maxDeviationBps before the contract returns a median price.
     function getValidatedPrice(bytes32 assetId) external view returns (uint256) {
         OracleConfig memory config = _requireOracleConfig(assetId);
-
-        uint256 primaryPrice = _readOracle(assetId, config.primaryOracle);
+        uint256 primaryPrice = _loadValidatedPrice(assetId, config.primaryOracle);
 
         if (config.secondaryOracle == address(0)) {
             return primaryPrice;
         }
 
-        uint256 secondaryPrice = _readOracle(assetId, config.secondaryOracle);
-        uint256 deviationBps = _deviationBps(primaryPrice, secondaryPrice);
-
-        if (deviationBps > maxDeviationBps) {
-            revert PriceDeviationTooHigh(assetId, deviationBps, maxDeviationBps);
-        }
-
-        return _medianOfTwo(primaryPrice, secondaryPrice);
+        uint256 secondaryPrice = _loadValidatedPrice(assetId, config.secondaryOracle);
+        return _boundedMedianPrice(assetId, primaryPrice, secondaryPrice);
     }
 
+    // Lighter helper path: it still validates each feed, but it intentionally skips
+    // the cross-feed deviation bound and always returns the median of valid feeds.
     function getMedianPrice(bytes32 assetId) external view returns (uint256) {
         OracleConfig memory config = _requireOracleConfig(assetId);
-
-        uint256 primaryPrice = _readOracle(assetId, config.primaryOracle);
+        uint256 primaryPrice = _loadValidatedPrice(assetId, config.primaryOracle);
 
         if (config.secondaryOracle == address(0)) {
             return primaryPrice;
         }
 
-        uint256 secondaryPrice = _readOracle(assetId, config.secondaryOracle);
+        uint256 secondaryPrice = _loadValidatedPrice(assetId, config.secondaryOracle);
         return _medianOfTwo(primaryPrice, secondaryPrice);
     }
 
@@ -138,36 +146,83 @@ contract OracleGuard is Ownable {
         if (config.primaryOracle == address(0)) revert AssetOracleNotSet(assetId);
     }
 
-    function _readOracle(bytes32 assetId, address oracle) internal view returns (uint256 normalizedPrice) {
-        uint8 oracleDecimals = IPriceOracle(oracle).decimals();
-        if (oracleDecimals > 18) revert OracleDecimalsTooHigh(oracleDecimals);
+    // Audit flow: raw oracle read -> validation -> normalization.
+    function _loadValidatedPrice(bytes32 assetId, address oracle) internal view returns (uint256) {
+        OracleObservation memory observation = _readObservation(oracle);
+        _validateObservation(assetId, observation);
+        return _scaleTo1e18(uint256(observation.answer), observation.decimals);
+    }
 
-        (, int256 answer,, uint256 updatedAt,) = IPriceOracle(oracle).latestRoundData();
+    function _readObservation(address oracle) internal view returns (OracleObservation memory observation) {
+        IPriceOracle priceOracle = IPriceOracle(oracle);
 
-        if (answer <= 0) revert InvalidOracleResponse();
-        if (block.timestamp > updatedAt + maxStaleness) {
-            revert StalePrice(assetId, oracle, updatedAt, maxStaleness);
+        observation.oracle = oracle;
+        observation.decimals = priceOracle.decimals();
+        (observation.roundId, observation.answer,, observation.updatedAt, observation.answeredInRound) =
+            priceOracle.latestRoundData();
+    }
+
+    // Shared fail-safe checks before any feed can influence protocol solvency logic.
+    function _validateObservation(bytes32 assetId, OracleObservation memory observation) internal view {
+        _requireSupportedDecimals(observation.decimals);
+        _requireSaneRound(observation);
+        _requireFreshRound(assetId, observation);
+    }
+
+    function _boundedMedianPrice(
+        bytes32 assetId,
+        uint256 primaryPrice,
+        uint256 secondaryPrice
+    ) internal view returns (uint256) {
+        uint256 deviationBps = _deviationBps(primaryPrice, secondaryPrice);
+        if (deviationBps > maxDeviationBps) {
+            revert PriceDeviationTooHigh(assetId, deviationBps, maxDeviationBps);
         }
 
-        normalizedPrice = _scaleTo1e18(uint256(answer), oracleDecimals);
+        return _medianOfTwo(primaryPrice, secondaryPrice);
+    }
+
+    function _requireSupportedDecimals(uint8 decimals) internal pure {
+        if (decimals > NORMALIZED_DECIMALS) revert OracleDecimalsTooHigh(decimals);
+    }
+
+    function _requireSaneRound(OracleObservation memory observation) internal pure {
+        if (
+            observation.roundId == 0 ||
+            observation.answer <= 0 ||
+            observation.updatedAt == 0 ||
+            observation.answeredInRound < observation.roundId
+        ) {
+            revert InvalidOracleResponse();
+        }
+    }
+
+    function _requireFreshRound(bytes32 assetId, OracleObservation memory observation) internal view {
+        if (observation.updatedAt > block.timestamp) revert InvalidOracleResponse();
+
+        if (block.timestamp - observation.updatedAt > maxStaleness) {
+            revert StalePrice(assetId, observation.oracle, observation.updatedAt, maxStaleness);
+        }
     }
 
     function _scaleTo1e18(uint256 value, uint8 oracleDecimals) internal pure returns (uint256) {
-        if (oracleDecimals == 18) return value;
-        return value * (10 ** (18 - oracleDecimals));
+        if (oracleDecimals == NORMALIZED_DECIMALS) return value;
+        return value * (10 ** uint256(NORMALIZED_DECIMALS - oracleDecimals));
     }
 
     function _deviationBps(uint256 a, uint256 b) internal pure returns (uint256) {
         uint256 larger = a > b ? a : b;
         uint256 smaller = a > b ? b : a;
-        return ((larger - smaller) * 10_000) / larger;
+        return ((larger - smaller) * BPS_SCALE) / larger;
     }
 
     function _medianOfTwo(uint256 a, uint256 b) internal pure returns (uint256) {
-        return (a + b) / 2;
+        uint256 larger = a > b ? a : b;
+        uint256 smaller = a > b ? b : a;
+        return smaller + ((larger - smaller) / 2);
     }
 
     function _validateBps(uint256 value) internal pure {
-        if (value > 10_000) revert PriceDeviationTooHigh(bytes32(0), value, 10_000);
+        if (value > BPS_SCALE) revert PriceDeviationTooHigh(bytes32(0), value, BPS_SCALE);
     }
 }
