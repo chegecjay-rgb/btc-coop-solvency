@@ -70,11 +70,34 @@ contract OracleGuardTest is Test {
         assertEq(price, 100_500 ether);
     }
 
+    function test_getValidatedPrice_acceptsDeviationAtThreshold() external {
+        secondary.setAnswer(95_000 * 1e8);
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+
+        uint256 price = guard.getValidatedPrice(BTC);
+        assertEq(price, 97_500 ether);
+    }
+
+    function test_getMedianPrice_returnsPrimaryIfNoSecondary() external {
+        guard.setOracleConfig(BTC, address(primary), address(0));
+
+        uint256 price = guard.getMedianPrice(BTC);
+        assertEq(price, 100_000 ether);
+    }
+
     function test_getMedianPrice_returnsMedian() external {
         guard.setOracleConfig(BTC, address(primary), address(secondary));
 
         uint256 price = guard.getMedianPrice(BTC);
         assertEq(price, 100_500 ether);
+    }
+
+    function test_getMedianPrice_ignoresDeviationCap() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        secondary.setAnswer(120_000 * 1e8);
+
+        uint256 price = guard.getMedianPrice(BTC);
+        assertEq(price, 110_000 ether);
     }
 
     function test_getValidatedPrice_revertsIfDeviationTooHigh() external {
@@ -105,6 +128,16 @@ contract OracleGuardTest is Test {
         guard.getValidatedPrice(BTC);
     }
 
+    function test_getMedianPrice_revertsIfPrimaryStale() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+
+        vm.warp(10 hours);
+        primary.setUpdatedAt(block.timestamp - 2 hours);
+
+        vm.expectRevert();
+        guard.getMedianPrice(BTC);
+    }
+
     function test_getValidatedPrice_revertsIfPrimaryInvalid() external {
         guard.setOracleConfig(BTC, address(primary), address(secondary));
         primary.setAnswer(0);
@@ -121,6 +154,54 @@ contract OracleGuardTest is Test {
         guard.getValidatedPrice(BTC);
     }
 
+    function test_getMedianPrice_revertsIfPrimaryInvalid() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        primary.setAnswer(0);
+
+        vm.expectRevert(OracleGuard.InvalidOracleResponse.selector);
+        guard.getMedianPrice(BTC);
+    }
+
+    function test_getValidatedPrice_revertsIfRoundMetadataInvalid() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        primary.setRoundData(100_000 * 1e8, block.timestamp, 2, 1);
+
+        vm.expectRevert(OracleGuard.InvalidOracleResponse.selector);
+        guard.getValidatedPrice(BTC);
+    }
+
+    function test_getValidatedPrice_revertsIfUpdatedAtIsZero() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        primary.setRoundData(100_000 * 1e8, 0, 1, 1);
+
+        vm.expectRevert(OracleGuard.InvalidOracleResponse.selector);
+        guard.getValidatedPrice(BTC);
+    }
+
+    function test_getValidatedPrice_revertsIfTimestampInFuture() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        primary.setUpdatedAt(block.timestamp + 1);
+
+        vm.expectRevert(OracleGuard.InvalidOracleResponse.selector);
+        guard.getValidatedPrice(BTC);
+    }
+
+    function test_getMedianPrice_revertsIfTimestampInFuture() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+        primary.setUpdatedAt(block.timestamp + 1);
+
+        vm.expectRevert(OracleGuard.InvalidOracleResponse.selector);
+        guard.getMedianPrice(BTC);
+    }
+
+    function test_getValidatedPrice_revertsIfOracleDecimalsTooHigh() external {
+        MockOracle d19 = new MockOracle(19, 100_000 * 1e19, block.timestamp);
+        guard.setOracleConfig(BTC, address(d19), address(0));
+
+        vm.expectRevert(abi.encodeWithSelector(OracleGuard.OracleDecimalsTooHigh.selector, 19));
+        guard.getValidatedPrice(BTC);
+    }
+
     function test_getValidatedPrice_revertsIfNotConfigured() external {
         vm.expectRevert(abi.encodeWithSelector(OracleGuard.AssetOracleNotSet.selector, BTC));
         guard.getValidatedPrice(BTC);
@@ -134,6 +215,15 @@ contract OracleGuardTest is Test {
     function test_isPriceValid_falseForBadPrice() external {
         guard.setOracleConfig(BTC, address(primary), address(secondary));
         secondary.setAnswer(200_000 * 1e8);
+
+        assertEq(guard.isPriceValid(BTC), false);
+    }
+
+    function test_isPriceValid_falseForStalePrice() external {
+        guard.setOracleConfig(BTC, address(primary), address(secondary));
+
+        vm.warp(10 hours);
+        primary.setUpdatedAt(block.timestamp - 2 hours);
 
         assertEq(guard.isPriceValid(BTC), false);
     }
