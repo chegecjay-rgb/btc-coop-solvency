@@ -10,8 +10,23 @@ import {BuybackCoverManager} from "src/core/BuybackCoverManager.sol";
 import {BuybackClaimLedger} from "src/core/BuybackClaimLedger.sol";
 import {BuybackFlashRouter} from "src/core/BuybackFlashRouter.sol";
 import {ParameterRegistry} from "src/core/ParameterRegistry.sol";
+import {ProtocolRevenueRouter} from "src/core/ProtocolRevenueRouter.sol";
 import {InsuranceReserve} from "src/vaults/InsuranceReserve.sol";
 import {MockERC20} from "test/mocks/MockERC20.sol";
+
+contract MockInterestRateModelRevenue {
+    function stabilizerShareBps(bytes32) external pure returns (uint256) {
+        return 0;
+    }
+
+    function insuranceShareBps(bytes32) external pure returns (uint256) {
+        return 0;
+    }
+
+    function treasuryShareBps(bytes32) external pure returns (uint256) {
+        return 0;
+    }
+}
 
 contract BuybackFlashRouterTest is Test {
     PositionRegistry internal positionRegistry;
@@ -21,8 +36,10 @@ contract BuybackFlashRouterTest is Test {
     BuybackClaimLedger internal claimLedger;
     BuybackFlashRouter internal flashRouter;
     ParameterRegistry internal parameterRegistry;
+    ProtocolRevenueRouter internal revenueRouter;
     InsuranceReserve internal insuranceReserve;
     MockERC20 internal stable;
+    MockInterestRateModelRevenue internal irm;
 
     address internal owner = address(this);
     address internal issuer = address(0xCAFE);
@@ -44,13 +61,33 @@ contract BuybackFlashRouterTest is Test {
         collateralManager = new CollateralManager(owner);
         parameterRegistry = new ParameterRegistry(owner);
         insuranceReserve = new InsuranceReserve(owner, address(stable));
+        irm = new MockInterestRateModelRevenue();
+
+        revenueRouter = new ProtocolRevenueRouter(owner, address(irm));
+        revenueRouter.setRoute(
+            BTC,
+            address(stable),
+            address(0x1111),
+            address(0x2222),
+            address(insuranceReserve),
+            address(0x3333)
+        );
+        revenueRouter.setFeeSplit(
+            BTC,
+            ProtocolRevenueRouter.FeeKind.InsurancePremium,
+            0,
+            0,
+            10_000,
+            0
+        );
 
         coverManager = new BuybackCoverManager(
             owner,
             address(positionRegistry),
             address(parameterRegistry),
             address(insuranceReserve),
-            address(stable)
+            address(stable),
+            address(revenueRouter)
         );
 
         claimLedger = new BuybackClaimLedger(
@@ -68,6 +105,7 @@ contract BuybackFlashRouterTest is Test {
             address(positionRegistry)
         );
 
+        revenueRouter.setAuthorizedCollector(address(coverManager), true);
         claimLedger.setAuthorizedIssuer(issuer, true);
         claimLedger.setAuthorizedIssuer(address(flashRouter), true);
         flashRouter.setAuthorizedSettler(settler, true);
