@@ -10,6 +10,7 @@ import {OracleGuard} from "src/oracles/OracleGuard.sol";
 import {ExpectedLossEngine} from "src/risk/ExpectedLossEngine.sol";
 import {HealthFactorCalculator} from "src/risk/HealthFactorCalculator.sol";
 import {RiskEngine} from "src/risk/RiskEngine.sol";
+import {CollateralRail} from "src/types/CollateralRail.sol";
 import {LendingLiquidityVault} from "src/vaults/LendingLiquidityVault.sol";
 import {StabilizationPool} from "src/vaults/StabilizationPool.sol";
 import {MockOracle} from "test/mocks/MockOracle.sol";
@@ -43,11 +44,7 @@ contract RiskEngineTest is Test {
         debtLedger = new DebtLedger(owner);
         oracleGuard = new OracleGuard(owner, 500, 1 hours);
 
-        expectedLossEngine = new ExpectedLossEngine(
-            owner,
-            address(positionRegistry),
-            address(debtLedger)
-        );
+        expectedLossEngine = new ExpectedLossEngine(owner, address(positionRegistry), address(debtLedger));
 
         calculator = new HealthFactorCalculator(
             address(parameterRegistry),
@@ -209,5 +206,36 @@ contract RiskEngineTest is Test {
         // required 90k
         // ratio = 3.333... * 1e18
         assertEq(riskEngine.solvencyRatio(BTC, 1000), 3_333_333_333_333_333_333);
+    }
+
+    function test_rail2_dynamicBorrowCapStoredSeparatelyFromRail1Cap() external {
+        parameterRegistry.setRailRiskParams(
+            BTC,
+            CollateralRail.ENFORCEABLE_NATIVE,
+            ParameterRegistry.RiskParams({
+                maxBorrowLTVBps: 5000,
+                rescueTriggerLTVBps: 6000,
+                liquidationLTVBps: 7000,
+                targetPostRescueLTVBps: 4500,
+                collateralHaircutBps: 1000,
+                liquidationBufferBps: 300,
+                maxRescueAttempts: 2,
+                rescueCooldown: 1 hours,
+                buybackClaimDuration: 7 days
+            })
+        );
+
+        uint256 rail1Cap = riskEngine.refreshDynamicBorrowCapForRail(BTC, CollateralRail.PROTOCOL_ESCROW);
+
+        uint256 rail2Cap = riskEngine.refreshDynamicBorrowCapForRail(BTC, CollateralRail.ENFORCEABLE_NATIVE);
+
+        assertEq(rail1Cap, 7000);
+        assertEq(rail2Cap, 5000);
+
+        assertEq(riskEngine.dynamicBorrowCapBpsByRail(BTC, CollateralRail.PROTOCOL_ESCROW), 7000);
+
+        assertEq(riskEngine.dynamicBorrowCapBpsByRail(BTC, CollateralRail.ENFORCEABLE_NATIVE), 5000);
+
+        assertEq(riskEngine.dynamicBorrowCapBps(BTC), 7000);
     }
 }

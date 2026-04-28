@@ -9,6 +9,7 @@ import {CollateralManager} from "src/core/CollateralManager.sol";
 import {DebtLedger} from "src/core/DebtLedger.sol";
 import {RecapitalizationEngine} from "src/core/RecapitalizationEngine.sol";
 import {LiquidationEngine} from "src/core/LiquidationEngine.sol";
+import {CollateralRail} from "src/types/CollateralRail.sol";
 import {OracleGuard} from "src/oracles/OracleGuard.sol";
 import {ExpectedLossEngine} from "src/risk/ExpectedLossEngine.sol";
 import {HealthFactorCalculator} from "src/risk/HealthFactorCalculator.sol";
@@ -56,11 +57,7 @@ contract LiquidationEngineTest is Test {
         debtLedger = new DebtLedger(owner);
         oracleGuard = new OracleGuard(owner, 500, 1 hours);
 
-        expectedLossEngine = new ExpectedLossEngine(
-            owner,
-            address(positionRegistry),
-            address(debtLedger)
-        );
+        expectedLossEngine = new ExpectedLossEngine(owner, address(positionRegistry), address(debtLedger));
 
         healthFactorCalculator = new HealthFactorCalculator(
             address(parameterRegistry),
@@ -215,9 +212,7 @@ contract LiquidationEngineTest is Test {
         collateralManager.lockCollateral(2, 5 ether);
 
         vm.prank(liquidator);
-        vm.expectRevert(
-            abi.encodeWithSelector(LiquidationEngine.PositionNotLiquidatable.selector, 2)
-        );
+        vm.expectRevert(abi.encodeWithSelector(LiquidationEngine.PositionNotLiquidatable.selector, 2));
         liquidationEngine.executeLiquidation(2);
     }
 
@@ -234,5 +229,59 @@ contract LiquidationEngineTest is Test {
         assertEq(uint256(p.state), 8);
 
         assertEq(liquidationEngine.liquidatedPosition(1), true);
+    }
+
+    function test_rail1_liquidationStillWorks() external {
+        vm.prank(liquidator);
+        liquidationEngine.executeLiquidation(1);
+
+        CollateralManager.CollateralRecord memory c = collateralManager.getCollateralRecord(1);
+        assertEq(c.lockedCollateral, 0);
+        assertEq(c.transferredToStabilization, 1 ether);
+
+        assertEq(liquidationEngine.liquidatedPosition(1), true);
+        assertEq(liquidationEngine.liquidationRecoveryByPosition(1), 100_000 ether);
+        assertEq(recapitalizationEngine.recoveryByPosition(1), 100_000 ether);
+    }
+
+    function test_rail1_terminalSettlementStillWorks() external {
+        vm.prank(liquidator);
+        liquidationEngine.executeLiquidation(1);
+
+        vm.prank(liquidator);
+        liquidationEngine.settlePostLiquidation(1);
+
+        PositionRegistry.Position memory p = positionRegistry.getPosition(1);
+        assertEq(p.collateralAmount, 0);
+        assertEq(p.debtPrincipal, 0);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Closed));
+    }
+
+    function test_rail2_liquidationRevertsWhenNativeAdapterMissing() external {
+        uint256 positionId = _createNativeDistressedPosition();
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(LiquidationEngine.NativeRailSettlementAdapterMissing.selector, positionId)
+        );
+        liquidationEngine.executeLiquidation(positionId);
+    }
+
+    function test_rail2_postLiquidationSettlementRevertsWhenNativeAdapterMissing() external {
+        uint256 positionId = _createNativeDistressedPosition();
+
+        vm.prank(liquidator);
+        vm.expectRevert(
+            abi.encodeWithSelector(LiquidationEngine.NativeRailSettlementAdapterMissing.selector, positionId)
+        );
+        liquidationEngine.settlePostLiquidation(positionId);
+    }
+
+    function _createNativeDistressedPosition() internal returns (uint256 positionId) {
+        positionId = positionRegistry.createPositionWithRail(
+            user, BTC, 1 ether, 100_000 ether, false, CollateralRail.ENFORCEABLE_NATIVE
+        );
+
+        debtLedger.initializeDebtRecord(positionId, 100_000 ether);
     }
 }

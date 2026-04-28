@@ -9,6 +9,7 @@ import {DebtLedger} from "src/core/DebtLedger.sol";
 import {OracleGuard} from "src/oracles/OracleGuard.sol";
 import {ExpectedLossEngine} from "src/risk/ExpectedLossEngine.sol";
 import {HealthFactorCalculator} from "src/risk/HealthFactorCalculator.sol";
+import {CollateralRail} from "src/types/CollateralRail.sol";
 import {MockOracle} from "test/mocks/MockOracle.sol";
 
 contract HealthFactorCalculatorTest is Test {
@@ -31,11 +32,7 @@ contract HealthFactorCalculatorTest is Test {
         debtLedger = new DebtLedger(owner);
         oracleGuard = new OracleGuard(owner, 500, 1 hours);
 
-        expectedLossEngine = new ExpectedLossEngine(
-            owner,
-            address(positionRegistry),
-            address(debtLedger)
-        );
+        expectedLossEngine = new ExpectedLossEngine(owner, address(positionRegistry), address(debtLedger));
 
         calculator = new HealthFactorCalculator(
             address(parameterRegistry),
@@ -66,13 +63,7 @@ contract HealthFactorCalculatorTest is Test {
         positionRegistry.setAuthorizedWriter(address(this), true);
         debtLedger.setAuthorizedWriter(address(this), true);
 
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            70_000 ether,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 70_000 ether, false);
         require(positionId == 1, "unexpected position id");
 
         debtLedger.initializeDebtRecord(1, 70_000 ether);
@@ -103,36 +94,18 @@ contract HealthFactorCalculatorTest is Test {
     }
 
     function test_classify_returnsAtRisk() external view {
-        assertEq(
-            uint256(calculator.classify(1)),
-            uint256(HealthFactorCalculator.HealthClassification.AtRisk)
-        );
+        assertEq(uint256(calculator.classify(1)), uint256(HealthFactorCalculator.HealthClassification.AtRisk));
     }
 
     function test_classify_returnsHealthy() external {
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            60_000 ether,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 60_000 ether, false);
         debtLedger.initializeDebtRecord(positionId, 60_000 ether);
 
-        assertEq(
-            uint256(calculator.classify(positionId)),
-            uint256(HealthFactorCalculator.HealthClassification.Healthy)
-        );
+        assertEq(uint256(calculator.classify(positionId)), uint256(HealthFactorCalculator.HealthClassification.Healthy));
     }
 
     function test_classify_returnsRescueEligible() external {
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            75_000 ether,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 75_000 ether, false);
         debtLedger.initializeDebtRecord(positionId, 75_000 ether);
 
         assertEq(
@@ -142,43 +115,24 @@ contract HealthFactorCalculatorTest is Test {
     }
 
     function test_classify_returnsLiquidatable() external {
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            80_000 ether,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 80_000 ether, false);
         debtLedger.initializeDebtRecord(positionId, 80_000 ether);
         debtLedger.increaseDebt(positionId, 10_000 ether);
 
         assertEq(
-            uint256(calculator.classify(positionId)),
-            uint256(HealthFactorCalculator.HealthClassification.Liquidatable)
+            uint256(calculator.classify(positionId)), uint256(HealthFactorCalculator.HealthClassification.Liquidatable)
         );
     }
 
     function test_healthFactor_returnsMaxWhenDebtIsZero() external {
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            0,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 0, false);
         debtLedger.initializeDebtRecord(positionId, 0);
 
         assertEq(calculator.healthFactor(positionId), type(uint256).max);
     }
 
     function test_healthFactor_returnsZeroWhenAdjustmentsConsumeCollateral() external {
-        uint256 positionId = positionRegistry.createPosition(
-            user,
-            BTC,
-            1 ether,
-            89_000 ether,
-            false
-        );
+        uint256 positionId = positionRegistry.createPosition(user, BTC, 1 ether, 89_000 ether, false);
         debtLedger.initializeDebtRecord(positionId, 89_000 ether);
 
         expectedLossEngine.setVolatilityBps(BTC, 9000);
@@ -186,5 +140,36 @@ contract HealthFactorCalculatorTest is Test {
         expectedLossEngine.setRecoveryRateBps(BTC, 0);
 
         assertEq(calculator.healthFactor(positionId), 0);
+    }
+
+    function test_rail2_classificationUsesRailSpecificRiskParams() external {
+        parameterRegistry.setRailRiskParams(
+            BTC,
+            CollateralRail.ENFORCEABLE_NATIVE,
+            ParameterRegistry.RiskParams({
+                maxBorrowLTVBps: 5000,
+                rescueTriggerLTVBps: 6000,
+                liquidationLTVBps: 7000,
+                targetPostRescueLTVBps: 4500,
+                collateralHaircutBps: 1000,
+                liquidationBufferBps: 300,
+                maxRescueAttempts: 2,
+                rescueCooldown: 1 hours,
+                buybackClaimDuration: 7 days
+            })
+        );
+
+        uint256 nativePositionId = positionRegistry.createPositionWithRail(
+            user, BTC, 1 ether, 70_000 ether, false, CollateralRail.ENFORCEABLE_NATIVE
+        );
+
+        debtLedger.initializeDebtRecord(nativePositionId, 70_000 ether);
+
+        assertEq(uint256(calculator.classify(1)), uint256(HealthFactorCalculator.HealthClassification.AtRisk));
+
+        assertEq(
+            uint256(calculator.classify(nativePositionId)),
+            uint256(HealthFactorCalculator.HealthClassification.Liquidatable)
+        );
     }
 }
