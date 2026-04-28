@@ -15,6 +15,7 @@ interface IParameterRegistryForHF {
     }
 
     function getRiskParams(bytes32 assetId) external view returns (RiskParams memory);
+    function getEffectiveRiskParams(bytes32 assetId, uint8 collateralRail) external view returns (RiskParams memory);
 }
 
 interface IOracleGuardForHF {
@@ -37,6 +38,7 @@ interface IPositionRegistryForHF {
         uint256 lastRescueTime;
         bool hasBuybackCover;
         bytes32 activeRemoteIntentId;
+        uint8 collateralRail;
     }
 
     function getPosition(uint256 positionId) external view returns (Position memory);
@@ -82,11 +84,8 @@ contract HealthFactorCalculator {
         address debtLedger_
     ) {
         if (
-            parameterRegistry_ == address(0) ||
-            oracleGuard_ == address(0) ||
-            expectedLossEngine_ == address(0) ||
-            positionRegistry_ == address(0) ||
-            debtLedger_ == address(0)
+            parameterRegistry_ == address(0) || oracleGuard_ == address(0) || expectedLossEngine_ == address(0)
+                || positionRegistry_ == address(0) || debtLedger_ == address(0)
         ) revert ZeroAddress();
 
         parameterRegistry = parameterRegistry_;
@@ -97,11 +96,10 @@ contract HealthFactorCalculator {
     }
 
     function riskAdjustedCollateral(uint256 positionId) public view returns (uint256) {
-        IPositionRegistryForHF.Position memory p =
-            IPositionRegistryForHF(positionRegistry).getPosition(positionId);
+        IPositionRegistryForHF.Position memory p = IPositionRegistryForHF(positionRegistry).getPosition(positionId);
 
         IParameterRegistryForHF.RiskParams memory params_ =
-            IParameterRegistryForHF(parameterRegistry).getRiskParams(p.assetId);
+            IParameterRegistryForHF(parameterRegistry).getEffectiveRiskParams(p.assetId, p.collateralRail);
 
         uint256 price = IOracleGuardForHF(oracleGuard).getValidatedPrice(p.assetId);
 
@@ -123,11 +121,10 @@ contract HealthFactorCalculator {
     }
 
     function liquidationExecutionBuffer(uint256 positionId) public view returns (uint256) {
-        IPositionRegistryForHF.Position memory p =
-            IPositionRegistryForHF(positionRegistry).getPosition(positionId);
+        IPositionRegistryForHF.Position memory p = IPositionRegistryForHF(positionRegistry).getPosition(positionId);
 
         IParameterRegistryForHF.RiskParams memory params_ =
-            IParameterRegistryForHF(parameterRegistry).getRiskParams(p.assetId);
+            IParameterRegistryForHF(parameterRegistry).getEffectiveRiskParams(p.assetId, p.collateralRail);
 
         uint256 debt = _totalDebt(positionId);
         return (debt * params_.liquidationBufferBps) / 10_000;
@@ -152,11 +149,10 @@ contract HealthFactorCalculator {
     }
 
     function classify(uint256 positionId) external view returns (HealthClassification) {
-        IPositionRegistryForHF.Position memory p =
-            IPositionRegistryForHF(positionRegistry).getPosition(positionId);
+        IPositionRegistryForHF.Position memory p = IPositionRegistryForHF(positionRegistry).getPosition(positionId);
 
         IParameterRegistryForHF.RiskParams memory params_ =
-            IParameterRegistryForHF(parameterRegistry).getRiskParams(p.assetId);
+            IParameterRegistryForHF(parameterRegistry).getEffectiveRiskParams(p.assetId, p.collateralRail);
 
         uint256 adjustedCollateral = riskAdjustedCollateral(positionId);
         if (adjustedCollateral == 0) revert InvalidCollateralValue();
@@ -179,16 +175,9 @@ contract HealthFactorCalculator {
     }
 
     function _totalDebt(uint256 positionId) internal view returns (uint256) {
-        IDebtLedgerForHF.DebtRecord memory d =
-            IDebtLedgerForHF(debtLedger).getDebtRecord(positionId);
+        IDebtLedgerForHF.DebtRecord memory d = IDebtLedgerForHF(debtLedger).getDebtRecord(positionId);
 
-        return
-            d.principal +
-            d.accruedInterest +
-            d.rescueCapitalUsed +
-            d.rescueFeesAccrued +
-            d.insuranceCapitalUsed +
-            d.insuranceChargesAccrued +
-            d.settlementCosts;
+        return d.principal + d.accruedInterest + d.rescueCapitalUsed + d.rescueFeesAccrued + d.insuranceCapitalUsed
+            + d.insuranceChargesAccrued + d.settlementCosts;
     }
 }

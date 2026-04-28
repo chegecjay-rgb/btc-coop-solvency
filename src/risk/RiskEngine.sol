@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+import {CollateralRail} from "../types/CollateralRail.sol";
+
 interface IParameterRegistryForRisk {
     struct RiskParams {
         uint256 maxBorrowLTVBps;
@@ -25,6 +27,7 @@ interface IParameterRegistryForRisk {
     }
 
     function getRiskParams(bytes32 assetId) external view returns (RiskParams memory);
+    function getEffectiveRiskParams(bytes32 assetId, uint8 collateralRail) external view returns (RiskParams memory);
     function getRemoteLiquidityParams(bytes32 assetId) external view returns (RemoteLiquidityParams memory);
 }
 
@@ -45,12 +48,7 @@ interface IStabilizationPoolForRisk {
     function pools(bytes32 assetId)
         external
         view
-        returns (
-            uint256 stableLiquidity,
-            uint256 btcLiquidity,
-            uint256 activeRescueExposure,
-            uint256 recoveredProceeds
-        );
+        returns (uint256 stableLiquidity, uint256 btcLiquidity, uint256 activeRescueExposure, uint256 recoveredProceeds);
 
     function availableRescueLiquidity(bytes32 assetId) external view returns (uint256);
 }
@@ -95,6 +93,7 @@ interface IDebtLedgerForRisk {
 contract RiskEngine is Ownable {
     error ZeroAddress();
     error InvalidAssetId();
+    error InvalidCollateralRail(uint8 rail);
 
     enum LiquidityStressState {
         Normal,
@@ -120,9 +119,11 @@ contract RiskEngine is Ownable {
     address public immutable debtLedger;
 
     mapping(bytes32 => uint256) public dynamicBorrowCapBps;
+    mapping(bytes32 => mapping(uint8 => uint256)) public dynamicBorrowCapBpsByRail;
     mapping(bytes32 => LiquidityStressState) public stressStateByAsset;
 
     event DynamicBorrowCapRefreshed(bytes32 indexed assetId, uint256 newBorrowCapBps);
+    event RailDynamicBorrowCapRefreshed(bytes32 indexed assetId, uint8 indexed collateralRail, uint256 newBorrowCapBps);
     event MarketStressEvaluated(bytes32 indexed assetId, LiquidityStressState newState);
 
     constructor(
@@ -136,14 +137,9 @@ contract RiskEngine is Ownable {
         address debtLedger_
     ) Ownable(initialOwner) {
         if (
-            initialOwner == address(0) ||
-            parameterRegistry_ == address(0) ||
-            healthFactorCalculator_ == address(0) ||
-            lendingLiquidityVault_ == address(0) ||
-            stabilizationPool_ == address(0) ||
-            expectedLossEngine_ == address(0) ||
-            positionRegistry_ == address(0) ||
-            debtLedger_ == address(0)
+            initialOwner == address(0) || parameterRegistry_ == address(0) || healthFactorCalculator_ == address(0)
+                || lendingLiquidityVault_ == address(0) || stabilizationPool_ == address(0)
+                || expectedLossEngine_ == address(0) || positionRegistry_ == address(0) || debtLedger_ == address(0)
         ) revert ZeroAddress();
 
         parameterRegistry = parameterRegistry_;
@@ -156,10 +152,15 @@ contract RiskEngine is Ownable {
     }
 
     function refreshDynamicBorrowCap(bytes32 assetId) external returns (uint256) {
+        return refreshDynamicBorrowCapForRail(assetId, CollateralRail.PROTOCOL_ESCROW);
+    }
+
+    function refreshDynamicBorrowCapForRail(bytes32 assetId, uint8 collateralRail) public returns (uint256) {
         if (assetId == bytes32(0)) revert InvalidAssetId();
+        if (!CollateralRail.isValid(collateralRail)) revert InvalidCollateralRail(collateralRail);
 
         IParameterRegistryForRisk.RiskParams memory riskParams =
-            IParameterRegistryForRisk(parameterRegistry).getRiskParams(assetId);
+            IParameterRegistryForRisk(parameterRegistry).getEffectiveRiskParams(assetId, collateralRail);
 
         LiquidityStressState state = evaluateMarketStress(assetId);
 
@@ -172,22 +173,22 @@ contract RiskEngine is Ownable {
             cap = cap > 1_500 ? cap - 1_500 : 0;
         }
 
-        dynamicBorrowCapBps[assetId] = cap;
-        emit DynamicBorrowCapRefreshed(assetId, cap);
+        dynamicBorrowCapBpsByRail[assetId][collateralRail] = cap;
+
+        if (collateralRail == CollateralRail.PROTOCOL_ESCROW) {
+            dynamicBorrowCapBps[assetId] = cap;
+            emit DynamicBorrowCapRefreshed(assetId, cap);
+        }
+
+        emit RailDynamicBorrowCapRefreshed(assetId, collateralRail, cap);
         return cap;
     }
 
-    function positionRiskSnapshot(uint256 positionId)
-        external
-        view
-        returns (PositionRiskSnapshot memory snapshot)
-    {
+    function positionRiskSnapshot(uint256 positionId) external view returns (PositionRiskSnapshot memory snapshot) {
         uint256 adjustedCollateral =
             IHealthFactorCalculatorForRisk(healthFactorCalculator).riskAdjustedCollateral(positionId);
-        uint256 hf =
-            IHealthFactorCalculatorForRisk(healthFactorCalculator).healthFactor(positionId);
-        uint8 classification =
-            IHealthFactorCalculatorForRisk(healthFactorCalculator).classify(positionId);
+        uint256 hf = IHealthFactorCalculatorForRisk(healthFactorCalculator).healthFactor(positionId);
+        uint8 classification = IHealthFactorCalculatorForRisk(healthFactorCalculator).classify(positionId);
 
         uint256 totalDebt = _totalDebt(positionId);
         uint256 currentLTVBps = adjustedCollateral == 0 ? type(uint256).max : (totalDebt * 10_000) / adjustedCollateral;
@@ -207,9 +208,8 @@ contract RiskEngine is Ownable {
         IParameterRegistryForRisk.RemoteLiquidityParams memory remoteParams =
             IParameterRegistryForRisk(parameterRegistry).getRemoteLiquidityParams(assetId);
 
-        uint256 utilizationBps = _vaultAssetId() == assetId
-            ? ILendingLiquidityVaultForRisk(lendingLiquidityVault).utilization()
-            : 0;
+        uint256 utilizationBps =
+            _vaultAssetId() == assetId ? ILendingLiquidityVaultForRisk(lendingLiquidityVault).utilization() : 0;
 
         uint256 localLiquidityBps = _localLiquidityBps(assetId);
         uint256 rescueLoadBps = rescueLoadRatio(assetId);
@@ -217,21 +217,16 @@ contract RiskEngine is Ownable {
         LiquidityStressState newState;
 
         if (
-            utilizationBps >= 9_500 ||
-            localLiquidityBps < remoteParams.minLocalLiquidityBps / 2 ||
-            rescueLoadBps >= 9_000
+            utilizationBps >= 9_500 || localLiquidityBps < remoteParams.minLocalLiquidityBps / 2
+                || rescueLoadBps >= 9_000
         ) {
             newState = LiquidityStressState.Critical;
         } else if (
-            utilizationBps >= remoteParams.highUtilizationBps ||
-            localLiquidityBps < remoteParams.minLocalLiquidityBps ||
-            rescueLoadBps >= remoteParams.maxPendingRescueLoadBps
+            utilizationBps >= remoteParams.highUtilizationBps || localLiquidityBps < remoteParams.minLocalLiquidityBps
+                || rescueLoadBps >= remoteParams.maxPendingRescueLoadBps
         ) {
             newState = LiquidityStressState.Stressed;
-        } else if (
-            utilizationBps >= 7_000 ||
-            rescueLoadBps >= remoteParams.maxPendingRescueLoadBps / 2
-        ) {
+        } else if (utilizationBps >= 7_000 || rescueLoadBps >= remoteParams.maxPendingRescueLoadBps / 2) {
             newState = LiquidityStressState.Tight;
         } else {
             newState = LiquidityStressState.Normal;
@@ -244,20 +239,15 @@ contract RiskEngine is Ownable {
 
     function availableLocalLiquidity(bytes32 assetId) public view returns (uint256) {
         if (assetId == bytes32(0)) revert InvalidAssetId();
-        return _vaultAssetId() == assetId
-            ? ILendingLiquidityVaultForRisk(lendingLiquidityVault).availableLiquidity()
-            : 0;
+        return
+            _vaultAssetId() == assetId ? ILendingLiquidityVaultForRisk(lendingLiquidityVault).availableLiquidity() : 0;
     }
 
     function rescueLoadRatio(bytes32 assetId) public view returns (uint256) {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
-        (
-            uint256 stableLiquidity,
-            ,
-            uint256 activeRescueExposure,
-
-        ) = IStabilizationPoolForRisk(stabilizationPool).pools(assetId);
+        (uint256 stableLiquidity,, uint256 activeRescueExposure,) =
+            IStabilizationPoolForRisk(stabilizationPool).pools(assetId);
 
         uint256 denom = stableLiquidity + activeRescueExposure;
         if (denom == 0) return 0;
@@ -265,11 +255,7 @@ contract RiskEngine is Ownable {
         return (activeRescueExposure * 10_000) / denom;
     }
 
-    function shouldOpenRemoteIntent(
-        bytes32 assetId,
-        uint256 amountNeeded,
-        uint8 intentType
-    ) external returns (bool) {
+    function shouldOpenRemoteIntent(bytes32 assetId, uint256 amountNeeded, uint8 intentType) external returns (bool) {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
         LiquidityStressState state = evaluateMarketStress(assetId);
@@ -286,10 +272,8 @@ contract RiskEngine is Ownable {
     function rescueCapitalRequired(bytes32 assetId, uint256 shockBps) external view returns (uint256) {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
-        uint256 sensitivity =
-            IExpectedLossEngineForRisk(expectedLossEngine).rescueSensitivity(assetId, shockBps);
-        uint256 rescueLiquidity =
-            IStabilizationPoolForRisk(stabilizationPool).availableRescueLiquidity(assetId);
+        uint256 sensitivity = IExpectedLossEngineForRisk(expectedLossEngine).rescueSensitivity(assetId, shockBps);
+        uint256 rescueLiquidity = IStabilizationPoolForRisk(stabilizationPool).availableRescueLiquidity(assetId);
 
         return (rescueLiquidity * sensitivity) / 10_000;
     }
@@ -298,8 +282,7 @@ contract RiskEngine is Ownable {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
         uint256 localLiquidity = availableLocalLiquidity(assetId);
-        uint256 liquidityStress =
-            IExpectedLossEngineForRisk(expectedLossEngine).liquidityStressBpsByAsset(assetId);
+        uint256 liquidityStress = IExpectedLossEngineForRisk(expectedLossEngine).liquidityStressBpsByAsset(assetId);
 
         uint256 stressed = liquidityStress + shockBps;
         if (stressed > 10_000) stressed = 10_000;
@@ -311,10 +294,8 @@ contract RiskEngine is Ownable {
         if (assetId == bytes32(0)) revert InvalidAssetId();
 
         uint256 localLiquidity = availableLocalLiquidity(assetId);
-        uint256 rescueLiquidity =
-            IStabilizationPoolForRisk(stabilizationPool).availableRescueLiquidity(assetId);
-        uint256 required =
-            this.rescueCapitalRequired(assetId, shockBps);
+        uint256 rescueLiquidity = IStabilizationPoolForRisk(stabilizationPool).availableRescueLiquidity(assetId);
+        uint256 required = this.rescueCapitalRequired(assetId, shockBps);
 
         if (required == 0) return type(uint256).max;
 
@@ -336,16 +317,9 @@ contract RiskEngine is Ownable {
     }
 
     function _totalDebt(uint256 positionId) internal view returns (uint256) {
-        IDebtLedgerForRisk.DebtRecord memory d =
-            IDebtLedgerForRisk(debtLedger).getDebtRecord(positionId);
+        IDebtLedgerForRisk.DebtRecord memory d = IDebtLedgerForRisk(debtLedger).getDebtRecord(positionId);
 
-        return
-            d.principal +
-            d.accruedInterest +
-            d.rescueCapitalUsed +
-            d.rescueFeesAccrued +
-            d.insuranceCapitalUsed +
-            d.insuranceChargesAccrued +
-            d.settlementCosts;
+        return d.principal + d.accruedInterest + d.rescueCapitalUsed + d.rescueFeesAccrued + d.insuranceCapitalUsed
+            + d.insuranceChargesAccrued + d.settlementCosts;
     }
 }
