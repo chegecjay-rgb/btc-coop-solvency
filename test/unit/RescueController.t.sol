@@ -2,87 +2,168 @@
 pragma solidity 0.8.24;
 
 import {Test} from "forge-std/Test.sol";
-
-import {ParameterRegistry} from "src/core/ParameterRegistry.sol";
-import {PositionRegistry} from "src/core/PositionRegistry.sol";
-import {CollateralManager} from "src/core/CollateralManager.sol";
-import {DebtLedger} from "src/core/DebtLedger.sol";
 import {RescueController} from "src/core/RescueController.sol";
-import {OracleGuard} from "src/oracles/OracleGuard.sol";
-import {ExpectedLossEngine} from "src/risk/ExpectedLossEngine.sol";
-import {HealthFactorCalculator} from "src/risk/HealthFactorCalculator.sol";
-import {RiskEngine} from "src/risk/RiskEngine.sol";
-import {LendingLiquidityVault} from "src/vaults/LendingLiquidityVault.sol";
-import {StabilizationPool} from "src/vaults/StabilizationPool.sol";
-import {InsuranceReserve} from "src/vaults/InsuranceReserve.sol";
-import {MockOracle} from "test/mocks/MockOracle.sol";
+import {CollateralRail} from "src/types/CollateralRail.sol";
+import {PositionRegistry} from "src/core/PositionRegistry.sol";
+import {ParameterRegistry} from "src/core/ParameterRegistry.sol";
+import {DebtLedger} from "src/core/DebtLedger.sol";
+import {CollateralManager} from "src/core/CollateralManager.sol";
 import {MockERC20} from "test/mocks/MockERC20.sol";
 
+contract MockStabilizationPoolForRescue {
+    mapping(bytes32 => uint256) internal _available;
+    bytes32 internal _lastAssetId;
+    uint256 internal _lastDeployAmount;
+
+    function setAvailable(bytes32 assetId, uint256 amount) external {
+        _available[assetId] = amount;
+    }
+
+    function availableRescueLiquidity(bytes32 assetId) external view returns (uint256) {
+        return _available[assetId];
+    }
+
+    function deployRescueCapital(bytes32 assetId, uint256 amount) external {
+        _lastAssetId = assetId;
+        _lastDeployAmount = amount;
+        _available[assetId] -= amount;
+    }
+
+    function lastAssetId() external view returns (bytes32) {
+        return _lastAssetId;
+    }
+
+    function lastDeployAmount() external view returns (uint256) {
+        return _lastDeployAmount;
+    }
+}
+
+contract MockInsuranceReserveForRescue {
+    uint256 internal _lastPositionId;
+    uint256 internal _lastAmount;
+
+    function coverTerminalDeficit(uint256 positionId, uint256 amount) external {
+        _lastPositionId = positionId;
+        _lastAmount = amount;
+    }
+
+    function lastPositionId() external view returns (uint256) {
+        return _lastPositionId;
+    }
+
+    function lastAmount() external view returns (uint256) {
+        return _lastAmount;
+    }
+}
+
+contract MockRiskEngineForRescue {
+    struct PositionRiskSnapshot {
+        uint256 healthFactor;
+        uint256 adjustedCollateral;
+        uint256 totalDebt;
+        uint256 currentLTVBps;
+        uint8 classification;
+    }
+
+    mapping(uint256 => PositionRiskSnapshot) internal _snapshots;
+
+    function setSnapshot(
+        uint256 positionId,
+        uint256 healthFactor,
+        uint256 adjustedCollateral,
+        uint256 totalDebt,
+        uint256 currentLTVBps,
+        uint8 classification
+    ) external {
+        _snapshots[positionId] = PositionRiskSnapshot({
+            healthFactor: healthFactor,
+            adjustedCollateral: adjustedCollateral,
+            totalDebt: totalDebt,
+            currentLTVBps: currentLTVBps,
+            classification: classification
+        });
+    }
+
+    function positionRiskSnapshot(uint256 positionId) external view returns (PositionRiskSnapshot memory) {
+        return _snapshots[positionId];
+    }
+}
+
+contract MockRemoteIntentCoordinatorForRescue {
+    uint256 internal _callCount;
+    uint256 internal _lastPositionId;
+    uint256 internal _lastAmountNeeded;
+    address internal _lastBeneficiary;
+    address internal _lastSettlementAsset;
+    bytes32 internal _lastIntentId;
+
+    function requestRescueFill(uint256 positionId, uint256 amountNeeded, address beneficiary, address settlementAsset)
+        external
+        returns (bytes32 intentId)
+    {
+        _callCount += 1;
+        _lastPositionId = positionId;
+        _lastAmountNeeded = amountNeeded;
+        _lastBeneficiary = beneficiary;
+        _lastSettlementAsset = settlementAsset;
+        _lastIntentId = keccak256(
+            abi.encodePacked("RESCUE_INTENT", positionId, amountNeeded, beneficiary, settlementAsset, _callCount)
+        );
+        return _lastIntentId;
+    }
+
+    function callCount() external view returns (uint256) {
+        return _callCount;
+    }
+
+    function lastPositionId() external view returns (uint256) {
+        return _lastPositionId;
+    }
+
+    function lastAmountNeeded() external view returns (uint256) {
+        return _lastAmountNeeded;
+    }
+
+    function lastBeneficiary() external view returns (address) {
+        return _lastBeneficiary;
+    }
+
+    function lastSettlementAsset() external view returns (address) {
+        return _lastSettlementAsset;
+    }
+
+    function lastIntentId() external view returns (bytes32) {
+        return _lastIntentId;
+    }
+}
+
 contract RescueControllerTest is Test {
-    ParameterRegistry internal parameterRegistry;
     PositionRegistry internal positionRegistry;
-    CollateralManager internal collateralManager;
+    ParameterRegistry internal parameterRegistry;
     DebtLedger internal debtLedger;
-    OracleGuard internal oracleGuard;
-    ExpectedLossEngine internal expectedLossEngine;
-    HealthFactorCalculator internal healthFactorCalculator;
-    LendingLiquidityVault internal lendingVault;
-    StabilizationPool internal stabilizationPool;
-    InsuranceReserve internal insuranceReserve;
-    RiskEngine internal riskEngine;
+    CollateralManager internal collateralManager;
+    MockStabilizationPoolForRescue internal stabilizationPool;
+    MockInsuranceReserveForRescue internal insuranceReserve;
+    MockRiskEngineForRescue internal riskEngine;
+    MockRemoteIntentCoordinatorForRescue internal remoteIntentCoordinator;
+    MockERC20 internal stable;
     RescueController internal rescueController;
 
-    MockOracle internal oracle;
-    MockERC20 internal stable;
-    MockERC20 internal btc;
-
     address internal owner = address(this);
-    address internal executor = address(0xCAFE);
-    address internal lender = address(0x1111);
-    address internal stabilizer = address(0x2222);
-    address internal insurer = address(0x3333);
-    address internal user = address(0x4444);
+    address internal executor = address(0xABCD);
 
     bytes32 internal constant BTC = keccak256("BTC");
 
     function setUp() external {
-        parameterRegistry = new ParameterRegistry(owner);
         positionRegistry = new PositionRegistry(owner);
-        collateralManager = new CollateralManager(owner);
+        parameterRegistry = new ParameterRegistry(owner);
         debtLedger = new DebtLedger(owner);
-        oracleGuard = new OracleGuard(owner, 500, 1 hours);
-
-        expectedLossEngine = new ExpectedLossEngine(
-            owner,
-            address(positionRegistry),
-            address(debtLedger)
-        );
-
-        healthFactorCalculator = new HealthFactorCalculator(
-            address(parameterRegistry),
-            address(oracleGuard),
-            address(expectedLossEngine),
-            address(positionRegistry),
-            address(debtLedger)
-        );
-
-        stable = new MockERC20("USD Coin", "USDC", 18);
-        btc = new MockERC20("Wrapped BTC", "WBTC", 18);
-
-        lendingVault = new LendingLiquidityVault(owner, address(stable), BTC);
-        stabilizationPool = new StabilizationPool(owner, address(stable), address(btc));
-        insuranceReserve = new InsuranceReserve(owner, address(stable));
-
-        riskEngine = new RiskEngine(
-            owner,
-            address(parameterRegistry),
-            address(healthFactorCalculator),
-            address(lendingVault),
-            address(stabilizationPool),
-            address(expectedLossEngine),
-            address(positionRegistry),
-            address(debtLedger)
-        );
+        collateralManager = new CollateralManager(owner);
+        stabilizationPool = new MockStabilizationPoolForRescue();
+        insuranceReserve = new MockInsuranceReserveForRescue();
+        riskEngine = new MockRiskEngineForRescue();
+        remoteIntentCoordinator = new MockRemoteIntentCoordinatorForRescue();
+        stable = new MockERC20("USD Coin", "USDC", 6);
 
         rescueController = new RescueController(
             owner,
@@ -92,187 +173,189 @@ contract RescueControllerTest is Test {
             address(collateralManager),
             address(stabilizationPool),
             address(insuranceReserve),
-            address(riskEngine)
+            address(riskEngine),
+            address(remoteIntentCoordinator),
+            address(stable)
         );
 
+        rescueController.setAuthorizedSettlementHandler(address(this), true);
+
+        positionRegistry.setAuthorizedWriter(address(rescueController), true);
+        debtLedger.setAuthorizedWriter(address(rescueController), true);
+        collateralManager.setAuthorizedWriter(address(rescueController), true);
         rescueController.setAuthorizedExecutor(executor, true);
 
-        oracle = new MockOracle(18, 100_000 ether, block.timestamp);
-        oracleGuard.setOracleConfig(BTC, address(oracle), address(0));
+        positionRegistry.createPosition(address(0x1234), BTC, 100e6, 0, false);
+        debtLedger.initializeDebtRecord(1, 0);
+        collateralManager.initializeCollateralRecord(1, 100e6);
+        collateralManager.lockCollateral(1, 100e6);
 
         parameterRegistry.setRiskParams(
             BTC,
             ParameterRegistry.RiskParams({
                 maxBorrowLTVBps: 7000,
                 rescueTriggerLTVBps: 8000,
-                liquidationLTVBps: 8500,
-                targetPostRescueLTVBps: 6500,
-                collateralHaircutBps: 1000,
-                liquidationBufferBps: 300,
+                liquidationLTVBps: 9000,
+                targetPostRescueLTVBps: 6000,
+                collateralHaircutBps: 0,
+                liquidationBufferBps: 500,
                 maxRescueAttempts: 3,
-                rescueCooldown: 1 hours,
-                buybackClaimDuration: 7 days
+                rescueCooldown: 0,
+                buybackClaimDuration: 1 days
             })
         );
 
-        parameterRegistry.setRemoteLiquidityParams(
-            BTC,
-            ParameterRegistry.RemoteLiquidityParams({
-                minLocalLiquidityBps: 2000,
-                highUtilizationBps: 8500,
-                maxPendingRescueLoadBps: 4000,
-                remoteIntentFeeCapBps: 100,
-                remoteIntentDeadline: 15 minutes
-            })
-        );
-
-        expectedLossEngine.setVolatilityBps(BTC, 3000);
-        expectedLossEngine.setLiquidityStressBps(BTC, 5000);
-        expectedLossEngine.setRecoveryRateBps(BTC, 6000);
-
-        positionRegistry.setAuthorizedWriter(address(this), true);
-        positionRegistry.setAuthorizedWriter(address(rescueController), true);
-        debtLedger.setAuthorizedWriter(address(this), true);
-        debtLedger.setAuthorizedWriter(address(rescueController), true);
-        collateralManager.setAuthorizedWriter(address(this), true);
-        collateralManager.setAuthorizedWriter(address(rescueController), true);
-        lendingVault.setAuthorizedWriter(address(this), true);
-        stabilizationPool.setAuthorizedWriter(address(rescueController), true);
-        stabilizationPool.setSupportedAsset(BTC, true);
-        insuranceReserve.setAuthorizedWriter(address(rescueController), true);
-
-        stable.mint(lender, 1_000_000 ether);
-        stable.mint(stabilizer, 1_000_000 ether);
-        stable.mint(insurer, 1_000_000 ether);
-
-        vm.startPrank(lender);
-        stable.approve(address(lendingVault), type(uint256).max);
-        lendingVault.depositLiquidity(500_000 ether, lender);
-        vm.stopPrank();
-
-        vm.startPrank(stabilizer);
-        stable.approve(address(stabilizationPool), type(uint256).max);
-        stabilizationPool.depositStable(BTC, 200_000 ether);
-        vm.stopPrank();
-
-        vm.startPrank(insurer);
-        stable.approve(address(insuranceReserve), type(uint256).max);
-        insuranceReserve.depositReserve(300_000 ether);
-        vm.stopPrank();
-
-        positionRegistry.createPosition(user, BTC, 1 ether, 80_000 ether, false); // id 1
-        debtLedger.initializeDebtRecord(1, 80_000 ether);
-        collateralManager.initializeCollateralRecord(1, 1 ether);
-        collateralManager.lockCollateral(1, 1 ether);
-
-        positionRegistry.createPosition(user, BTC, 1 ether, 100_000 ether, false); // id 2
-        debtLedger.initializeDebtRecord(2, 100_000 ether);
-        collateralManager.initializeCollateralRecord(2, 1 ether);
-        collateralManager.lockCollateral(2, 1 ether);
+        riskEngine.setSnapshot(1, 0, 100e6, 80e6, 8000, 2);
+        stabilizationPool.setAvailable(BTC, 100e6);
     }
 
     function test_calculateRescueSize_returnsExpectedValue() external view {
-        assertEq(rescueController.calculateRescueSize(1), 21_500 ether);
+        uint256 rescueAmount = rescueController.calculateRescueSize(1);
+        assertEq(rescueAmount, 20e6);
     }
 
     function test_applyRescueFee_returnsExpectedValue() external view {
-        assertEq(rescueController.applyRescueFee(1, 21_500 ether), 215 ether);
+        uint256 fee = rescueController.applyRescueFee(1, 20e6);
+        assertEq(fee, 200_000);
+    }
+
+    function test_executeRescue_marksTerminalWhenMaxAttemptsReached() external {
+        parameterRegistry.setRiskParams(
+            BTC,
+            ParameterRegistry.RiskParams({
+                maxBorrowLTVBps: 7000,
+                rescueTriggerLTVBps: 8000,
+                liquidationLTVBps: 9000,
+                targetPostRescueLTVBps: 6000,
+                collateralHaircutBps: 0,
+                liquidationBufferBps: 500,
+                maxRescueAttempts: 0,
+                rescueCooldown: 0,
+                buybackClaimDuration: 1 days
+            })
+        );
+
+        vm.prank(executor);
+        rescueController.executeRescue(1);
+
+        (,,, bool terminalFlag) = rescueController.rescueByPosition(1);
+        PositionRegistry.Position memory p = positionRegistry.getPosition(1);
+
+        assertEq(terminalFlag, true);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Terminal));
+    }
+
+    function test_executeRescue_opensRemoteIntentWhenPoolInsufficient() external {
+        stabilizationPool.setAvailable(BTC, 10e6);
+
+        vm.prank(executor);
+        rescueController.executeRescue(1);
+
+        assertEq(remoteIntentCoordinator.callCount(), 1);
+        assertEq(remoteIntentCoordinator.lastPositionId(), 1);
+        assertEq(remoteIntentCoordinator.lastAmountNeeded(), 20e6);
+        assertEq(remoteIntentCoordinator.lastBeneficiary(), address(stabilizationPool));
+        assertEq(remoteIntentCoordinator.lastSettlementAsset(), address(stable));
+
+        (,,, bool terminalFlag) = rescueController.rescueByPosition(1);
+        assertEq(terminalFlag, false);
+
+        PositionRegistry.Position memory p = positionRegistry.getPosition(1);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Healthy));
     }
 
     function test_executeRescue_updatesPoolDebtAndState() external {
         vm.prank(executor);
         rescueController.executeRescue(1);
 
-        (
-            uint256 stableLiquidity,
-            ,
-            uint256 activeRescueExposure,
+        DebtLedger.DebtRecord memory d = debtLedger.getDebtRecord(1);
+        PositionRegistry.Position memory p = positionRegistry.getPosition(1);
+        (uint256 totalRescued, uint256 lastRescueAmount, uint256 rescueFees, bool terminalFlag) =
+            rescueController.rescueByPosition(1);
 
-        ) = stabilizationPool.pools(BTC);
+        assertEq(stabilizationPool.lastAssetId(), BTC);
+        assertEq(stabilizationPool.lastDeployAmount(), 20e6);
+        assertEq(d.rescueCapitalUsed, 20e6);
+        assertEq(d.rescueFeesAccrued, 200_000);
+        assertEq(p.rescueCount, 1);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Rescued));
+        assertEq(totalRescued, 20e6);
+        assertEq(lastRescueAmount, 20e6);
+        assertEq(rescueFees, 200_000);
+        assertEq(terminalFlag, false);
+        assertEq(rescueController.localRescuedByPosition(1), 20e6);
+        assertEq(rescueController.remoteRescuedByPosition(1), 0);
+    }
 
-        assertEq(stableLiquidity, 178_500 ether);
-        assertEq(activeRescueExposure, 21_500 ether);
+    function test_consumeRemoteRescueSettlement_updatesAccountingAndProvenance() external {
+        rescueController.consumeRemoteRescueSettlement(1, 10e6, false);
 
         DebtLedger.DebtRecord memory d = debtLedger.getDebtRecord(1);
-        assertEq(d.rescueCapitalUsed, 21_500 ether);
-        assertEq(d.rescueFeesAccrued, 215 ether);
-
         PositionRegistry.Position memory p = positionRegistry.getPosition(1);
-        assertEq(p.rescueCount, 1);
-        assertEq(uint256(p.state), 4);
+        (uint256 totalRescued, uint256 lastRescueAmount, uint256 rescueFees, bool terminalFlag) =
+            rescueController.rescueByPosition(1);
 
-        (
-            uint256 totalRescued,
-            uint256 lastRescueAmount,
-            uint256 rescueFees,
-            bool terminalFlag
-        ) = rescueController.rescueByPosition(1);
-
-        assertEq(totalRescued, 21_500 ether);
-        assertEq(lastRescueAmount, 21_500 ether);
-        assertEq(rescueFees, 215 ether);
+        assertEq(d.rescueCapitalUsed, 10e6);
+        assertEq(d.rescueFeesAccrued, 100_000);
+        assertEq(totalRescued, 10e6);
+        assertEq(lastRescueAmount, 10e6);
+        assertEq(rescueFees, 100_000);
         assertEq(terminalFlag, false);
+        assertEq(rescueController.localRescuedByPosition(1), 0);
+        assertEq(rescueController.remoteRescuedByPosition(1), 10e6);
+        assertEq(p.rescueCount, 0);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Healthy));
     }
 
-    function test_executeRescue_marksTerminalWhenMaxAttemptsReached() external {
-        positionRegistry.incrementRescueCount(1);
-        positionRegistry.incrementRescueCount(1);
-        positionRegistry.incrementRescueCount(1);
+    function test_consumeRemoteRescueSettlement_finalMarksRescued() external {
+        rescueController.consumeRemoteRescueSettlement(1, 20e6, true);
 
-        vm.prank(executor);
-        rescueController.executeRescue(1);
-
+        DebtLedger.DebtRecord memory d = debtLedger.getDebtRecord(1);
         PositionRegistry.Position memory p = positionRegistry.getPosition(1);
-        assertEq(uint256(p.state), 6);
 
-        (, , , bool terminalFlag) = rescueController.rescueByPosition(1);
-        assertEq(terminalFlag, true);
-    }
-
-    function test_executeRescue_marksTerminalWhenPoolInsufficient() external {
-        stabilizationPool.setAuthorizedWriter(address(this), true);
-        stabilizationPool.deployRescueCapital(BTC, 190_000 ether);
-
-        vm.prank(executor);
-        rescueController.executeRescue(2);
-
-        PositionRegistry.Position memory p = positionRegistry.getPosition(2);
-        assertEq(uint256(p.state), 6);
+        assertEq(d.rescueCapitalUsed, 20e6);
+        assertEq(d.rescueFeesAccrued, 200_000);
+        assertEq(rescueController.remoteRescuedByPosition(1), 20e6);
+        assertEq(p.rescueCount, 1);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Rescued));
     }
 
     function test_markTerminal_updatesState() external {
         vm.prank(executor);
         rescueController.markTerminal(1);
 
+        (,,, bool terminalFlag) = rescueController.rescueByPosition(1);
         PositionRegistry.Position memory p = positionRegistry.getPosition(1);
-        assertEq(uint256(p.state), 6);
 
-        (, , , bool terminalFlag) = rescueController.rescueByPosition(1);
         assertEq(terminalFlag, true);
+        assertEq(uint256(p.state), uint256(PositionRegistry.PositionState.Terminal));
     }
 
     function test_routeTerminalSettlement_recordsInsuranceAndMovesCollateral() external {
-        vm.prank(executor);
-        rescueController.markTerminal(2);
+        riskEngine.setSnapshot(1, 0, 60e6, 80e6, 13_333, 3);
 
         vm.prank(executor);
-        rescueController.routeTerminalSettlement(2);
+        rescueController.routeTerminalSettlement(1);
 
-        (
-            ,
-            uint256 systemDeficitCovered,
-            ,
-            bool active
-        ) = insuranceReserve.exposureByPosition(2);
+        DebtLedger.DebtRecord memory d = debtLedger.getDebtRecord(1);
+        CollateralManager.CollateralRecord memory c = collateralManager.getCollateralRecord(1);
 
-        assertEq(systemDeficitCovered, 10_000 ether);
-        assertEq(active, true);
-
-        DebtLedger.DebtRecord memory d = debtLedger.getDebtRecord(2);
-        assertEq(d.insuranceCapitalUsed, 10_000 ether);
-
-        CollateralManager.CollateralRecord memory c = collateralManager.getCollateralRecord(2);
+        assertEq(insuranceReserve.lastPositionId(), 1);
+        assertEq(insuranceReserve.lastAmount(), 20e6);
+        assertEq(d.insuranceCapitalUsed, 20e6);
+        assertEq(c.transferredToInsurance, 100e6);
         assertEq(c.lockedCollateral, 0);
-        assertEq(c.transferredToInsurance, 1 ether);
+    }
+
+    function test_rail2_terminalSettlementRevertsWhenNativeAdapterMissing() external {
+        uint256 positionId = positionRegistry.createPositionWithRail(
+            address(0x5678), BTC, 100e6, 0, false, CollateralRail.ENFORCEABLE_NATIVE
+        );
+
+        vm.prank(executor);
+        vm.expectRevert(
+            abi.encodeWithSelector(RescueController.NativeRailSettlementAdapterMissing.selector, positionId)
+        );
+        rescueController.routeTerminalSettlement(positionId);
     }
 }

@@ -41,6 +41,7 @@ contract ProtocolRevenueRouter is Ownable {
         BorrowInterest,
         RescueFee,
         InsurancePremium,
+        InsuranceCharge,
         SettlementCost,
         RemoteLiquidityFee
     }
@@ -60,6 +61,15 @@ contract ProtocolRevenueRouter is Ownable {
         uint16 insuranceShareBps;
         uint16 treasuryShareBps;
         bool configured;
+    }
+
+    struct RevenueBreakdown {
+        uint256 borrowInterest;
+        uint256 rescueFee;
+        uint256 insurancePremium;
+        uint256 insuranceCharge;
+        uint256 settlementCost;
+        uint256 remoteLiquidityFee;
     }
 
     address public immutable interestRateModel;
@@ -88,12 +98,7 @@ contract ProtocolRevenueRouter is Ownable {
         uint16 treasuryShareBps
     );
 
-    event RevenueReceived(
-        FeeKind indexed feeKind,
-        bytes32 indexed assetId,
-        address indexed payer,
-        uint256 amount
-    );
+    event RevenueReceived(FeeKind indexed feeKind, bytes32 indexed assetId, address indexed payer, uint256 amount);
 
     event RevenueRouted(
         FeeKind indexed feeKind,
@@ -104,9 +109,7 @@ contract ProtocolRevenueRouter is Ownable {
         uint256 treasuryAmount
     );
 
-    constructor(address initialOwner, address interestRateModel_)
-        Ownable(initialOwner)
-    {
+    constructor(address initialOwner, address interestRateModel_) Ownable(initialOwner) {
         if (initialOwner == address(0) || interestRateModel_ == address(0)) {
             revert ZeroAddress();
         }
@@ -138,11 +141,8 @@ contract ProtocolRevenueRouter is Ownable {
     ) external onlyOwner {
         if (assetId == bytes32(0)) revert ZeroAssetId();
         if (
-            feeToken == address(0) ||
-            lendingVault == address(0) ||
-            stabilizationPool == address(0) ||
-            insuranceReserve == address(0) ||
-            treasuryVault == address(0)
+            feeToken == address(0) || lendingVault == address(0) || stabilizationPool == address(0)
+                || insuranceReserve == address(0) || treasuryVault == address(0)
         ) revert ZeroAddress();
 
         routeByAssetId[assetId] = RouteConfig({
@@ -154,14 +154,25 @@ contract ProtocolRevenueRouter is Ownable {
             configured: true
         });
 
-        emit RouteConfigured(
-            assetId,
-            feeToken,
-            lendingVault,
-            stabilizationPool,
-            insuranceReserve,
-            treasuryVault
-        );
+        emit RouteConfigured(assetId, feeToken, lendingVault, stabilizationPool, insuranceReserve, treasuryVault);
+    }
+
+    function getRoute(bytes32 assetId)
+        external
+        view
+        returns (
+            address feeToken,
+            address lendingVault,
+            address stabilizationPool,
+            address insuranceReserve,
+            address treasuryVault,
+            bool configured
+        )
+    {
+        if (assetId == bytes32(0)) revert ZeroAssetId();
+
+        RouteConfig memory r = routeByAssetId[assetId];
+        return (r.feeToken, r.lendingVault, r.stabilizationPool, r.insuranceReserve, r.treasuryVault, r.configured);
     }
 
     function setFeeSplit(
@@ -174,11 +185,8 @@ contract ProtocolRevenueRouter is Ownable {
     ) external onlyOwner {
         if (assetId == bytes32(0)) revert ZeroAssetId();
 
-        uint256 total =
-            uint256(lenderShareBps) +
-            uint256(stabilizerShareBps) +
-            uint256(insuranceShareBps) +
-            uint256(treasuryShareBps);
+        uint256 total = uint256(lenderShareBps) + uint256(stabilizerShareBps) + uint256(insuranceShareBps)
+            + uint256(treasuryShareBps);
 
         if (total != BPS_DENOMINATOR) revert InvalidSplitBps(total);
 
@@ -191,24 +199,14 @@ contract ProtocolRevenueRouter is Ownable {
         });
 
         emit FeeSplitConfigured(
-            assetId,
-            uint8(feeKind),
-            lenderShareBps,
-            stabilizerShareBps,
-            insuranceShareBps,
-            treasuryShareBps
+            assetId, uint8(feeKind), lenderShareBps, stabilizerShareBps, insuranceShareBps, treasuryShareBps
         );
     }
 
     function previewDistribution(FeeKind feeKind, bytes32 assetId, uint256 amount)
         external
         view
-        returns (
-            uint256 lenderAmount,
-            uint256 stabilizerAmount,
-            uint256 insuranceAmount,
-            uint256 treasuryAmount
-        )
+        returns (uint256 lenderAmount, uint256 stabilizerAmount, uint256 insuranceAmount, uint256 treasuryAmount)
     {
         if (assetId == bytes32(0)) revert ZeroAssetId();
         if (amount == 0) revert InvalidAmount();
@@ -221,12 +219,10 @@ contract ProtocolRevenueRouter is Ownable {
         treasuryAmount = amount - lenderAmount - stabilizerAmount - insuranceAmount;
     }
 
-    function routeRevenueFrom(
-        FeeKind feeKind,
-        bytes32 assetId,
-        address payer,
-        uint256 amount
-    ) external onlyAuthorizedCollector {
+    function routeRevenueFrom(FeeKind feeKind, bytes32 assetId, address payer, uint256 amount)
+        external
+        onlyAuthorizedCollector
+    {
         if (assetId == bytes32(0)) revert ZeroAssetId();
         if (payer == address(0)) revert ZeroAddress();
         if (amount == 0) revert InvalidAmount();
@@ -241,11 +237,7 @@ contract ProtocolRevenueRouter is Ownable {
         _routeRevenue(feeKind, assetId, amount, route);
     }
 
-    function routeHeldRevenue(
-        FeeKind feeKind,
-        bytes32 assetId,
-        uint256 amount
-    ) external onlyAuthorizedCollector {
+    function routeHeldRevenue(FeeKind feeKind, bytes32 assetId, uint256 amount) external onlyAuthorizedCollector {
         if (assetId == bytes32(0)) revert ZeroAssetId();
         if (amount == 0) revert InvalidAmount();
 
@@ -257,12 +249,52 @@ contract ProtocolRevenueRouter is Ownable {
         _routeRevenue(feeKind, assetId, amount, route);
     }
 
-    function _routeRevenue(
-        FeeKind feeKind,
-        bytes32 assetId,
-        uint256 amount,
-        RouteConfig memory route
-    ) internal {
+    function routeRevenueBreakdownHeld(bytes32 assetId, RevenueBreakdown calldata breakdown)
+        external
+        onlyAuthorizedCollector
+    {
+        if (assetId == bytes32(0)) revert ZeroAssetId();
+
+        uint256 total = breakdown.borrowInterest + breakdown.rescueFee + breakdown.insurancePremium
+            + breakdown.insuranceCharge + breakdown.settlementCost + breakdown.remoteLiquidityFee;
+
+        if (total == 0) revert InvalidAmount();
+
+        RouteConfig memory route = routeByAssetId[assetId];
+        if (!route.configured) revert RouteNotConfigured(assetId);
+
+        if (breakdown.borrowInterest > 0) {
+            emit RevenueReceived(FeeKind.BorrowInterest, assetId, address(this), breakdown.borrowInterest);
+            _routeRevenue(FeeKind.BorrowInterest, assetId, breakdown.borrowInterest, route);
+        }
+
+        if (breakdown.rescueFee > 0) {
+            emit RevenueReceived(FeeKind.RescueFee, assetId, address(this), breakdown.rescueFee);
+            _routeRevenue(FeeKind.RescueFee, assetId, breakdown.rescueFee, route);
+        }
+
+        if (breakdown.insurancePremium > 0) {
+            emit RevenueReceived(FeeKind.InsurancePremium, assetId, address(this), breakdown.insurancePremium);
+            _routeRevenue(FeeKind.InsurancePremium, assetId, breakdown.insurancePremium, route);
+        }
+
+        if (breakdown.insuranceCharge > 0) {
+            emit RevenueReceived(FeeKind.InsuranceCharge, assetId, address(this), breakdown.insuranceCharge);
+            _routeRevenue(FeeKind.InsuranceCharge, assetId, breakdown.insuranceCharge, route);
+        }
+
+        if (breakdown.settlementCost > 0) {
+            emit RevenueReceived(FeeKind.SettlementCost, assetId, address(this), breakdown.settlementCost);
+            _routeRevenue(FeeKind.SettlementCost, assetId, breakdown.settlementCost, route);
+        }
+
+        if (breakdown.remoteLiquidityFee > 0) {
+            emit RevenueReceived(FeeKind.RemoteLiquidityFee, assetId, address(this), breakdown.remoteLiquidityFee);
+            _routeRevenue(FeeKind.RemoteLiquidityFee, assetId, breakdown.remoteLiquidityFee, route);
+        }
+    }
+
+    function _routeRevenue(FeeKind feeKind, bytes32 assetId, uint256 amount, RouteConfig memory route) internal {
         FeeSplit memory split = _resolveSplit(feeKind, assetId);
 
         uint256 lenderAmount = (amount * split.lenderShareBps) / BPS_DENOMINATOR;
@@ -273,19 +305,13 @@ contract ProtocolRevenueRouter is Ownable {
         if (lenderAmount > 0) {
             IERC20(route.feeToken).approve(route.lendingVault, 0);
             IERC20(route.feeToken).approve(route.lendingVault, lenderAmount);
-            ILendingLiquidityVaultRevenue(route.lendingVault).receiveRepaymentFrom(
-                address(this),
-                lenderAmount
-            );
+            ILendingLiquidityVaultRevenue(route.lendingVault).receiveRepaymentFrom(address(this), lenderAmount);
         }
 
         if (stabilizerAmount > 0) {
             IERC20(route.feeToken).approve(route.stabilizationPool, 0);
             IERC20(route.feeToken).approve(route.stabilizationPool, stabilizerAmount);
-            IStabilizationPoolRevenue(route.stabilizationPool).depositStable(
-                assetId,
-                stabilizerAmount
-            );
+            IStabilizationPoolRevenue(route.stabilizationPool).depositStable(assetId, stabilizerAmount);
         }
 
         if (insuranceAmount > 0) {
@@ -300,28 +326,14 @@ contract ProtocolRevenueRouter is Ownable {
             ITreasuryVaultRevenue(route.treasuryVault).receiveProtocolRevenue(treasuryAmount);
         }
 
-        emit RevenueRouted(
-            feeKind,
-            assetId,
-            lenderAmount,
-            stabilizerAmount,
-            insuranceAmount,
-            treasuryAmount
-        );
+        emit RevenueRouted(feeKind, assetId, lenderAmount, stabilizerAmount, insuranceAmount, treasuryAmount);
     }
 
-    function _resolveSplit(FeeKind feeKind, bytes32 assetId)
-        internal
-        view
-        returns (FeeSplit memory split)
-    {
+    function _resolveSplit(FeeKind feeKind, bytes32 assetId) internal view returns (FeeSplit memory split) {
         if (feeKind == FeeKind.BorrowInterest) {
-            uint256 stabilizerShare =
-                IInterestRateModelRevenue(interestRateModel).stabilizerShareBps(assetId);
-            uint256 insuranceShare =
-                IInterestRateModelRevenue(interestRateModel).insuranceShareBps(assetId);
-            uint256 treasuryShare =
-                IInterestRateModelRevenue(interestRateModel).treasuryShareBps(assetId);
+            uint256 stabilizerShare = IInterestRateModelRevenue(interestRateModel).stabilizerShareBps(assetId);
+            uint256 insuranceShare = IInterestRateModelRevenue(interestRateModel).insuranceShareBps(assetId);
+            uint256 treasuryShare = IInterestRateModelRevenue(interestRateModel).treasuryShareBps(assetId);
 
             uint256 nonLenderTotal = stabilizerShare + insuranceShare + treasuryShare;
             if (nonLenderTotal > BPS_DENOMINATOR) revert InvalidSplitBps(nonLenderTotal);
