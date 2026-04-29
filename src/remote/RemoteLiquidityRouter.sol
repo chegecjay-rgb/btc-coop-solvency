@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 interface ISolverRegistryForRouter {
     function isApprovedSolver(address solver) external view returns (bool);
@@ -21,6 +22,22 @@ interface ISettlementAdapterForRouter {
             address solver,
             uint8 kind
         );
+}
+
+interface IProtocolRevenueRouterForRemote {
+    function getRoute(bytes32 assetId)
+        external
+        view
+        returns (
+            address feeToken,
+            address lendingVault,
+            address stabilizationPool,
+            address insuranceReserve,
+            address treasuryVault,
+            bool configured
+        );
+
+    function routeHeldRevenue(uint8 feeKind, bytes32 assetId, uint256 amount) external;
 }
 
 contract RemoteLiquidityRouter is Ownable {
@@ -44,6 +61,12 @@ contract RemoteLiquidityRouter is Ownable {
     error SettlementRejected(bytes32 intentId);
     error SettlementAmountExceedsVerified(uint256 amount, uint256 verifiedAmount);
     error SolverMismatch(address expected, address actual);
+    error RevenueRouterNotConfigured();
+    error FeeRouteNotConfigured(bytes32 assetId);
+    error FeeAmountExceedsOutstanding(uint256 amount, uint256 outstanding);
+    error TransferFailed();
+
+    uint8 internal constant FEE_KIND_REMOTE_LIQUIDITY = 5;
 
     enum RemoteIntentType {
         BorrowFill,
@@ -79,15 +102,20 @@ contract RemoteLiquidityRouter is Ownable {
     address public immutable solverRegistry;
     address public immutable settlementAdapter;
 
+    address public protocolRevenueRouter;
+
     mapping(bytes32 => RemoteLiquidityIntent) public intents;
     mapping(bytes32 => uint256) public pendingRemoteInbound;
     mapping(bytes32 => uint256) public committedRemoteInbound;
     mapping(bytes32 => uint256) public failedRemoteInbound;
     mapping(bytes32 => uint256) public remoteFeesAccrued;
     mapping(bytes32 => uint256) public settledAmountByIntent;
+    mapping(bytes32 => uint256) public remoteFeeAccruedByIntent;
+    mapping(bytes32 => uint256) public remoteFeeSettledByIntent;
     mapping(address => bool) public authorizedOpener;
 
     event AuthorizedOpenerSet(address indexed opener, bool allowed);
+    event RevenueRouterSet(address indexed protocolRevenueRouter);
 
     event IntentOpened(
         bytes32 indexed intentId,
@@ -118,6 +146,20 @@ contract RemoteLiquidityRouter is Ownable {
         RemoteIntentState newState
     );
 
+    event RemoteFeeSettled(
+        bytes32 indexed intentId,
+        bytes32 indexed assetId,
+        uint256 amount,
+        uint256 remainingOutstanding
+    );
+
+    event RemoteFeeWrittenOff(
+        bytes32 indexed intentId,
+        bytes32 indexed assetId,
+        uint256 amountWrittenOff,
+        uint256 remainingAssetOutstanding
+    );
+
     event IntentExpiredEvent(bytes32 indexed intentId, uint256 failedAmount);
     event IntentCancelled(bytes32 indexed intentId, uint256 failedAmount);
 
@@ -145,6 +187,12 @@ contract RemoteLiquidityRouter is Ownable {
         if (opener == address(0)) revert ZeroAddress();
         authorizedOpener[opener] = allowed;
         emit AuthorizedOpenerSet(opener, allowed);
+    }
+
+    function setRevenueRouter(address protocolRevenueRouter_) external onlyOwner {
+        if (protocolRevenueRouter_ == address(0)) revert ZeroAddress();
+        protocolRevenueRouter = protocolRevenueRouter_;
+        emit RevenueRouterSet(protocolRevenueRouter_);
     }
 
     function openIntent(
@@ -215,7 +263,8 @@ contract RemoteLiquidityRouter is Ownable {
         if (feeBps > solverCap) revert SolverFeeCapExceeded(feeBps, solverCap);
         if (feeBps > intent.maxFeeBps) revert IntentFeeCapExceeded(feeBps, intent.maxFeeBps);
 
-        uint256 capacity = ISolverRegistryForRouter(solverRegistry).maxSolverFill(msg.sender, intent.assetId);
+        uint256 capacity =
+            ISolverRegistryForRouter(solverRegistry).maxSolverFill(msg.sender, intent.assetId);
         if (amount > capacity) revert SolverCapacityExceeded(amount, capacity);
 
         if (intent.winningSolver == address(0)) {
@@ -232,6 +281,7 @@ contract RemoteLiquidityRouter is Ownable {
 
         uint256 feeAmount = (amount * feeBps) / 10_000;
         remoteFeesAccrued[intent.assetId] += feeAmount;
+        remoteFeeAccruedByIntent[intentId] += feeAmount;
 
         if (intent.amountFilled == intent.amountNeeded) {
             intent.state = RemoteIntentState.Filled;
@@ -272,7 +322,7 @@ contract RemoteLiquidityRouter is Ownable {
         ) = ISettlementAdapterForRouter(settlementAdapter).fillByIntent(intentId);
 
         if (!verified || !finalized) revert SettlementNotFinalized(intentId);
-        if (kind == 4) revert SettlementRejected(intentId); // Rejected
+        if (kind == 4) revert SettlementRejected(intentId);
         if (verifiedSolver != intent.winningSolver) {
             revert SolverMismatch(intent.winningSolver, verifiedSolver);
         }
@@ -297,6 +347,60 @@ contract RemoteLiquidityRouter is Ownable {
         emit IntentSettled(intentId, amount, newSettled, intent.state);
     }
 
+    function settleRemoteFee(bytes32 intentId, uint256 amount) external onlyAuthorizedOpener {
+        if (intentId == bytes32(0)) revert InvalidIntentId();
+        if (amount == 0) revert InvalidAmount();
+        if (protocolRevenueRouter == address(0)) revert RevenueRouterNotConfigured();
+
+        RemoteLiquidityIntent storage intent = _requireIntent(intentId);
+        if (
+            intent.state == RemoteIntentState.Open ||
+            intent.state == RemoteIntentState.Expired ||
+            intent.state == RemoteIntentState.Cancelled ||
+            intent.state == RemoteIntentState.Failed
+        ) revert InvalidIntentState(intentId);
+
+        if (settledAmountByIntent[intentId] == 0) {
+            revert SettlementNotFinalized(intentId);
+        }
+
+        uint256 outstanding = remoteFeeAccruedByIntent[intentId] - remoteFeeSettledByIntent[intentId];
+        if (amount > outstanding) revert FeeAmountExceedsOutstanding(amount, outstanding);
+
+        (
+            address feeToken,
+            ,
+            ,
+            ,
+            ,
+            bool configured
+        ) = IProtocolRevenueRouterForRemote(protocolRevenueRouter).getRoute(intent.assetId);
+
+        if (!configured) revert FeeRouteNotConfigured(intent.assetId);
+
+        bool ok = IERC20(feeToken).transferFrom(msg.sender, address(this), amount);
+        if (!ok) revert TransferFailed();
+
+        ok = IERC20(feeToken).transfer(protocolRevenueRouter, amount);
+        if (!ok) revert TransferFailed();
+
+        IProtocolRevenueRouterForRemote(protocolRevenueRouter).routeHeldRevenue(
+            FEE_KIND_REMOTE_LIQUIDITY,
+            intent.assetId,
+            amount
+        );
+
+        remoteFeeSettledByIntent[intentId] += amount;
+        remoteFeesAccrued[intent.assetId] -= amount;
+
+        emit RemoteFeeSettled(
+            intentId,
+            intent.assetId,
+            amount,
+            remoteFeeAccruedByIntent[intentId] - remoteFeeSettledByIntent[intentId]
+        );
+    }
+
     function expireIntent(bytes32 intentId) external onlyAuthorizedOpener {
         if (intentId == bytes32(0)) revert InvalidIntentId();
 
@@ -310,6 +414,7 @@ contract RemoteLiquidityRouter is Ownable {
 
         uint256 failedAmount = intent.amountNeeded - settledAmountByIntent[intentId];
         failedRemoteInbound[intent.assetId] += failedAmount;
+        _writeOffUnsettledRemoteFee(intentId, intent.assetId);
         intent.state = RemoteIntentState.Expired;
 
         emit IntentExpiredEvent(intentId, failedAmount);
@@ -327,6 +432,7 @@ contract RemoteLiquidityRouter is Ownable {
 
         uint256 failedAmount = intent.amountNeeded - settledAmountByIntent[intentId];
         failedRemoteInbound[intent.assetId] += failedAmount;
+        _writeOffUnsettledRemoteFee(intentId, intent.assetId);
         intent.state = RemoteIntentState.Cancelled;
 
         emit IntentCancelled(intentId, failedAmount);
@@ -335,6 +441,28 @@ contract RemoteLiquidityRouter is Ownable {
     function remainingAmount(bytes32 intentId) external view returns (uint256) {
         RemoteLiquidityIntent storage intent = _requireIntent(intentId);
         return intent.amountNeeded - intent.amountFilled;
+    }
+
+    function remoteFeeOutstandingByIntent(bytes32 intentId) external view returns (uint256) {
+        return remoteFeeAccruedByIntent[intentId] - remoteFeeSettledByIntent[intentId];
+    }
+
+    function _writeOffUnsettledRemoteFee(bytes32 intentId, bytes32 assetId) internal {
+        uint256 accrued = remoteFeeAccruedByIntent[intentId];
+        uint256 settled = remoteFeeSettledByIntent[intentId];
+
+        if (accrued > settled) {
+            uint256 writeOff = accrued - settled;
+            remoteFeeAccruedByIntent[intentId] = settled;
+            remoteFeesAccrued[assetId] -= writeOff;
+
+            emit RemoteFeeWrittenOff(
+                intentId,
+                assetId,
+                writeOff,
+                remoteFeesAccrued[assetId]
+            );
+        }
     }
 
     function _requireIntent(bytes32 intentId)

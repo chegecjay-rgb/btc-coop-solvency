@@ -146,7 +146,7 @@ contract LeverageEngineTest is Test {
         btc.approve(address(leverageEngine), 10 ether);
         uint256 positionId = leverageEngine.openPosition(BTC_ASSET, 10 ether, 10_000 ether, false);
 
-        stable.approve(address(lendingVault), 4_000 ether);
+        stable.approve(address(leverageEngine), 4_000 ether);
         leverageEngine.repay(positionId, 4_000 ether);
         vm.stopPrank();
 
@@ -162,7 +162,7 @@ contract LeverageEngineTest is Test {
         btc.approve(address(leverageEngine), 10 ether);
         uint256 positionId = leverageEngine.openPosition(BTC_ASSET, 10 ether, 10_000 ether, false);
 
-        stable.approve(address(lendingVault), 10_000 ether);
+        stable.approve(address(leverageEngine), 10_000 ether);
         leverageEngine.closePosition(positionId);
         vm.stopPrank();
 
