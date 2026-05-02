@@ -1,6 +1,6 @@
 # LUNA-COOP / BTC-Coop Solvency
 
-LUNA-COOP is an experimental BTC-first credit protocol architecture focused on solvency-aware borrowing, rescue-before-liquidation, and controlled settlement.
+LUNA-COOP is a BTC-first credit protocol architecture focused on solvency-aware borrowing, rescue-before-liquidation, and controlled settlement.
 
 The protocol is being developed around a simple principle:
 
@@ -10,7 +10,7 @@ This repository contains the Solidity-side prototype for Luna collateral, debt, 
 
 ## Current status
 
-This repository is a research and development prototype. It is not production software.
+This repository is a development prototype. It is not production software.
 
 The current implementation has a green Foundry test suite and includes:
 
@@ -36,7 +36,7 @@ Luna separates BTC collateral into two serious rails.
 
 ### Rail One: protocol-controlled escrowed wrapped BTC
 
-Rail One is the stronger current execution rail. Collateral is deposited into protocol-controlled escrow, so Luna can liquidate, settle, and close positions through smart-contract accounting.
+Collateral is deposited into protocol-controlled escrow, so Luna can liquidate, settle, and close positions through smart-contract accounting.
 
 ### Rail Two: enforceable native BTC
 
